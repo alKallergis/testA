@@ -703,10 +703,10 @@ int startProvisioning(void)
     cfg.Timeout10Secs      = PROVISIONING_TIMEOUT/10;
     cfg.ModeAfterFailure   = ROLE_STA;
     cfg.ModeAfterTimeout   = ROLE_STA;
-if(!IS_CONNECTED(g_ulStatus)){
+
     lRetVal = sl_extlib_ProvisioningStart(ROLE_STA, &cfg);
     ASSERT_ON_ERROR(lRetVal);
-}
+
     // Wait for WLAN Event
     while(!IS_IP_ACQUIRED(g_ulStatus))
     {
@@ -716,7 +716,6 @@ if(!IS_CONNECTED(g_ulStatus)){
         osi_Sleep(1);
 #endif
     }
-
 
     //
     // Turn ON the RED LED to indicate connection success
