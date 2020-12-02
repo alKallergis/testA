@@ -51,9 +51,9 @@ unsigned short freq0Msbs;
 unsigned short freq0Lsbs;
 unsigned short reset1=0b0000000100000000;
 unsigned short reset0=0b0000000000000000;
-int startFreq;
 unsigned short valAdc1[adcSamplesNumber][2],valAdc2[adcSamplesNumber][2],test1;
 unsigned long x;
+long spiRet;
 float ms,y;
 unsigned char i2cBuf[TR_BUFF_SIZE];
 
@@ -78,6 +78,7 @@ static tBoolean TA1running;
 static int adcIndex1,adcIndex3;
 void configTA1(void);
 void start12_5hz(void);
+void startatFreq(float freq );
 
 #if defined(ccs)
 extern void (* const g_pfnVectors[])(void);
@@ -97,15 +98,15 @@ void selectGain(){
     unsigned short D;//AD5272 digital wiper value
     float ohm;
     unsigned int iohm;
-    UART_PRINT("Select gain: \n\r1- g=10.02 \n\r2- g=102.07 \n\r3- g=506.262");
-    //D=56: ~5474ohm,g=10,02 ,  D=5:~489ohm,g=~102.07,  D=1:~97ohm, g=506.262
+    UART_PRINT("Select gain: \n\r1- g=1.494 \n\r2- g=2.997 \n\r3- g=10,02 \n\r4- g=102.07 \n\r5- g=506.262");
+    //      D=1023: G=1.494   D=253: G=~2.997,  D=56: ~5474ohm,g=10,02 ,  D=5:~489ohm,g=~102.07,  D=1:~97ohm, g=506.262,
     do
     {
         lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
         if (lRetVal==0){UART_PRINT("Wrong input,try again");}
         else{
             iInput  = (int)strtoul(acCmdStore,0,10);
-            if(iInput<=0 || iInput>3){
+            if(iInput<=0 || iInput>5){
                   UART_PRINT("Wrong input,try again");
                 }
             else break;
@@ -113,12 +114,18 @@ void selectGain(){
     }while(true);
     switch(iInput){
     case 1:
-        D=56;
+        D=1023;
         break;
     case 2:
-        D=5;
+        D=253;
         break;
     case 3:
+        D=56;
+        break;
+    case 4:
+        D=5;
+        break;
+    case 5:
         D=1;
         break;
     default:
@@ -131,18 +138,13 @@ void selectGain(){
     i2cBuf[0]=(D>>8)|0x04;
     i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC
 }
-void waitForEnter(){
-    char acCmdStore[50];
-    int lRetVal;
-    UART_PRINT("Press enter for next frequency...");
-    lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
-}
+
 
 int selectMode(){
     int iInput = 0;
     char acCmdStore[50];
     int lRetVal;
-    UART_PRINT("Give mode: 1-sinusoidal  2-triangle  3-square wave");
+    UART_PRINT("Give mode and press enter for measurement to start:\n\r1-sinusoidal  2-triangle  3-square wave\n\r");
     do
     {
         lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
@@ -157,84 +159,46 @@ int selectMode(){
     }while(true);
 }
 
-int getStartFreq(){
-    int iInput = 0;
-    char acCmdStore[50];
-    int lRetVal;
-    UART_PRINT("Give start frequency in Hz(integer):");
-    do
-    {
-        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
-        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
-        else{
-            iInput  = (int)strtoul(acCmdStore,0,10);
-            if(iInput<=0 || iInput>10000000){
-                  UART_PRINT("Wrong input,try again");
-                }
-            else return iInput;
-        }
-    }while(true);
-}
-
-int getEndFreq(){
-    int iInput = 0;
-    char acCmdStore[50];
-    int lRetVal;
-    UART_PRINT("Give end frequency in Hz(integer):");
-    do
-    {
-        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
-        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
-        else{
-            iInput  = (int)strtoul(acCmdStore,0,10);
-            if(iInput<=startFreq || iInput>10000000){
-                  UART_PRINT("Wrong input,try again");
-                }
-            else return iInput;
-        }
-    }while(true);
-}
-int getStepFreq(){
-    int iInput = 0;
-    char acCmdStore[50];
-    int lRetVal;
-    UART_PRINT("Give frequency step in Hz(integer):");
-    do
-    {
-        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
-        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
-        else{
-            iInput  = (int)strtoul(acCmdStore,0,10);
-            if(iInput<1 || iInput>10000000){
-                  UART_PRINT("Wrong input,try again");
-                }
-            else return iInput;
-        }
-    }while(true);
-}
 
 void start12_5hz(){
-    int mode=3;
     float freq=12.5;
     unsigned int frequencyReg=(freq*0x10000000)/20000000.0;    //make calculation as per datasheet.(mclk=20Mhz)
     freq0Lsbs= (frequencyReg&0x3fff) | 0b0100000000000000 ;//keep the 14 LSBs and set the 2 msbs according to datasheet
     freq0Msbs=  (frequencyReg>>14) | 0b0100000000000000 ;  //keep 14 msbs,set 2 msbs
     GPIOPinWrite(GPIOA3_BASE, 0x40,1<<6);    //MOSFET ON. insert to the position of bit6
     reset0=0b0000000000101000;
-    MAP_SPITransfer(GSPI_BASE,&reset1,0,2,
+    spiRet=MAP_SPITransfer(GSPI_BASE,&reset1,0,2,
             SPI_CS_ENABLE|SPI_CS_DISABLE);
-    MAP_SPITransfer(GSPI_BASE,&controlReg1,0,2,
+    spiRet=MAP_SPITransfer(GSPI_BASE,&controlReg1,0,2,
             SPI_CS_ENABLE|SPI_CS_DISABLE);
-    MAP_SPITransfer(GSPI_BASE,&freq0Lsbs,0,2,
+    spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Lsbs,0,2,
             SPI_CS_ENABLE|SPI_CS_DISABLE);
-    MAP_SPITransfer(GSPI_BASE,&freq0Msbs,0,2,
+    spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Msbs,0,2,
             SPI_CS_ENABLE|SPI_CS_DISABLE);
-    MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
+    spiRet=MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
             SPI_CS_ENABLE|SPI_CS_DISABLE);
     //
     // Report to the user
     //
     UART_PRINT("Outputting square @ freq :12.5Hz\n\r Default gain=102.07\n\r");
+}
+
+void startatFreq(float freq ){
+
+    unsigned int frequencyReg=(freq*0x10000000)/20000000.0;    //get frequency via UART, and make calculation as per datasheet.(mclk=20Mhz)
+    freq0Lsbs= (frequencyReg&0x3fff) | 0b0100000000000000 ;//keep the 14 LSBs and set the 2 msbs according to datasheet
+    freq0Msbs=  (frequencyReg>>14) | 0b0100000000000000 ;  //keep 14 msbs,set 2 msbs
+
+    spiRet=MAP_SPITransfer(GSPI_BASE,&reset1,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    spiRet=MAP_SPITransfer(GSPI_BASE,&controlReg1,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Lsbs,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Msbs,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    spiRet=MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
 }
 
 float tdif(unsigned long int m){
@@ -283,7 +247,7 @@ void digResSetup(void){
     i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);  //WRITE CONTROL REG FOR RDAC ENABLE
     i2cBuf[1]=5;
     i2cBuf[0]=(5>>8)|0x04;
-    i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC FOR GAIN=~102
+    i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC FOR GAIN=~102 FOR STARTERS
 
 }
 
@@ -338,9 +302,8 @@ static void adint3()
 static void countdownTimerInt()
 {
     if (TimerIntStatus(TIMERA1_BASE,true)==0x1){   // timeout int has happened
-        unsigned int x5=TimerValueGet(TIMERA1_BASE, TIMER_A);
+        //unsigned int x5=TimerValueGet(TIMERA1_BASE, TIMER_A);
         TimerIntClear(TIMERA1_BASE,TIMER_TIMA_TIMEOUT);
-        ADCDisable(ADC_BASE);    //STop in case it's measuring
         TA1running=false;
     }
 }
@@ -388,8 +351,7 @@ BoardInit(void)
 //*****************************************************************************
 void main()
 {
-
-    long spiRet=0;
+    int i;//clock interval counter
     //
     // Initialize Board configurations
     //
@@ -450,7 +412,7 @@ void main()
 
 
     unsigned int frequencyReg=0;
-    int freq=0;
+    float freq=0;
     int endFreq=0;
     int stepFreq=0;
     int mode=0;
@@ -485,9 +447,6 @@ void main()
     while(true){
         selectGain();
         mode=selectMode();
-        startFreq=getStartFreq();
-        endFreq=getEndFreq();
-        stepFreq=getStepFreq();
 
         switch(mode){
         case 1:
@@ -507,64 +466,63 @@ void main()
             GPIOPinWrite(GPIOA3_BASE, 0x40,0);
             reset0=0b0000000000000000;
         }
-        freq=startFreq;
-        while(freq<=endFreq){   //CLK FREQ is 20MHZ:
-            frequencyReg=(freq/20000000.0)*0x10000000;    //get frequency via UART, and make calculation as per datasheet.(mclk=20Mhz)
-            freq0Lsbs= (frequencyReg&0x3fff) | 0b0100000000000000 ;//keep the 14 LSBs and set the 2 msbs according to datasheet
-            freq0Msbs=  (frequencyReg>>14) | 0b0100000000000000 ;  //keep 14 msbs,set 2 msbs
+        freq=12.5;
+        startatFreq(freq);
+        UART_PRINT("Sweeping @ freq :%fHz\n\r",freq);
+        //delay 2,5mins in 1st time...
+/*        for (i=1;i<=3;i++){
+            TA1running=true;
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0*50));
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            while(TA1running==true);
+        }*/
 
-            spiRet=MAP_SPITransfer(GSPI_BASE,&reset1,0,2,
-                    SPI_CS_ENABLE|SPI_CS_DISABLE);
-            spiRet=MAP_SPITransfer(GSPI_BASE,&controlReg1,0,2,
-                    SPI_CS_ENABLE|SPI_CS_DISABLE);
-            spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Lsbs,0,2,
-                    SPI_CS_ENABLE|SPI_CS_DISABLE);
-            spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Msbs,0,2,
-                    SPI_CS_ENABLE|SPI_CS_DISABLE);
-            spiRet=MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
-                    SPI_CS_ENABLE|SPI_CS_DISABLE);
+        while(1){
+
+
+            //go for 36*50s=30min...
+/*            for (i=1;i<=35;i++){
+                TA1running=true;
+                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0*50));
+                TimerEnable(TIMERA1_BASE,TIMER_A);
+                while(TA1running==true);
+            }*/
+            TA1running=true;
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0*4));
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            while(TA1running==true);
+            //1sec before finighing...
+            TA1running=true;
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000));
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+
+            if(freq==12.5){
+                freq=20;
+            }
+            else if(freq==20){
+                freq=50;
+            }
+            else if(freq==50){
+                freq=100;
+            }
+            else if(freq==100){
+                freq=500;
+            }
+            else if(freq==500){
+                freq=1000;
+            }
+            else if(freq==1000){
+                freq=100000;
+            }
+            else if(freq==100000){
+                freq=12.5;
+            }
+            startatFreq(freq);
             //
             // Report to the user
             //
-            UART_PRINT("Sweeping @ freq :%dHz\n\r",freq);
-
-
-
-            //MAP_UtilsDelay(80000.0/6);               //wait for DDS. datasheet says wait 8 MCLK cycles. Worst case if 1Mhz,wait 640 cc3200 cycles.
-            TA1running=true;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,79); //  1us,worst case
-            TimerEnable(TIMERA1_BASE,TIMER_A);
+            UART_PRINT("Sweeping @ freq :%fHz\n\r",freq);
             while(TA1running==true);
-
-
-            adcIndex1=0;
-            adcIndex3=0;
-            TA1running=true;
-
-/*
-            //32bit timer init for measuring...
-            Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
-            TimerControlStall(TIMERA0_BASE, TIMER_A,true);  //enable timer stall on debug breakpoint
-            TimerLoadSet(TIMERA0_BASE,TIMER_A,0xffffffff);
-            TimerEnable(TIMERA0_BASE,TIMER_A);
-            x=TimerValueGet(TIMERA0_BASE, TIMER_A); //time reference.warning this method of time measurement can be max ~55s
-*/
-
-
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0/freq)); //  1/freq = 1 period.
-            TimerEnable(TIMERA1_BASE,TIMER_A);
-            ADCEnable(ADC_BASE);    //START TO MEASURE
-            while(TA1running==true);
-
-
-/*            y=tdif(x);  //us
-            ms=y/1000;  //ms
-            TimerDisable(TIMERA0_BASE,TIMER_A);*/
-            if(freq<endFreq){
-                waitForEnter();
-            }
-
-            freq+=stepFreq; //next frequency
 
         }
         UART_PRINT("Sweep finished\n\r");
