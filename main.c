@@ -52,10 +52,7 @@ unsigned short freq0Lsbs;
 unsigned short reset1=0b0000000100000000;
 unsigned short reset0=0b0000000000000000;
 int startFreq;
-float ohm;
-unsigned int iohm;
 unsigned short valAdc1[adcSamplesNumber][2],valAdc2[adcSamplesNumber][2],test1;
-unsigned short D;//AD5272 digital wiper value
 unsigned long x;
 float ms,y;
 unsigned char i2cBuf[TR_BUFF_SIZE];
@@ -68,6 +65,8 @@ int getStartFreq(void);
 int getEndFreq(void);
 int getStepFreq(void);
 int selectMode(void);
+void selectGain(void);
+void waitForEnter(void);
 float tdif(unsigned long int m);
 void configTA2(void);
 void adcSetup(void);
@@ -131,6 +130,12 @@ void selectGain(){
     i2cBuf[1]=D;
     i2cBuf[0]=(D>>8)|0x04;
     i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC
+}
+void waitForEnter(){
+    char acCmdStore[50];
+    int lRetVal;
+    UART_PRINT("Press enter for next frequency...");
+    lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
 }
 
 int selectMode(){
@@ -229,7 +234,7 @@ void start12_5hz(){
     //
     // Report to the user
     //
-    UART_PRINT("Outputting square @ freq :12.5Hz\n\r");
+    UART_PRINT("Outputting square @ freq :12.5Hz\n\r Default gain=102.07\n\r");
 }
 
 float tdif(unsigned long int m){
@@ -278,7 +283,8 @@ void digResSetup(void){
     i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);  //WRITE CONTROL REG FOR RDAC ENABLE
     i2cBuf[1]=5;
     i2cBuf[0]=(5>>8)|0x04;
-    i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC FOR GAIN=~102 FOR STARTERS
+    i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC FOR GAIN=~102
+
 }
 
 void adcSetup(){
@@ -382,7 +388,7 @@ BoardInit(void)
 //*****************************************************************************
 void main()
 {
-    int i2cret=0;
+
     long spiRet=0;
     //
     // Initialize Board configurations
@@ -441,6 +447,7 @@ void main()
     adcSetup();
     configTA1();  //countdown timer
     digResSetup();
+
 
     unsigned int frequencyReg=0;
     int freq=0;
@@ -544,7 +551,7 @@ void main()
 */
 
 
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(10000.0/freq)); //  1/freq = 1 period. TODO: CHANGED 1000->10000
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0/freq)); //  1/freq = 1 period.
             TimerEnable(TIMERA1_BASE,TIMER_A);
             ADCEnable(ADC_BASE);    //START TO MEASURE
             while(TA1running==true);
@@ -553,6 +560,9 @@ void main()
 /*            y=tdif(x);  //us
             ms=y/1000;  //ms
             TimerDisable(TIMERA0_BASE,TIMER_A);*/
+            if(freq<endFreq){
+                waitForEnter();
+            }
 
             freq+=stepFreq; //next frequency
 
