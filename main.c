@@ -1,120 +1,84 @@
-//*****************************************************************************
-//
-// Copyright (C) 2014 Texas Instruments Incorporated - http://www.ti.com/ 
-// 
-// 
-//  Redistribution and use in source and binary forms, with or without 
-//  modification, are permitted provided that the following conditions 
-//  are met:
-//
-//    Redistributions of source code must retain the above copyright 
-//    notice, this list of conditions and the following disclaimer.
-//
-//    Redistributions in binary form must reproduce the above copyright
-//    notice, this list of conditions and the following disclaimer in the 
-//    documentation and/or other materials provided with the   
-//    distribution.
-//
-//    Neither the name of Texas Instruments Incorporated nor the names of
-//    its contributors may be used to endorse or promote products derived
-//    from this software without specific prior written permission.
-//
-//  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
-//  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT 
-//  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-//  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT 
-//  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
-//  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT 
-//  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-//  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-//  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT 
-//  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
-//  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-//
-//*****************************************************************************
 
+// Standard includes
+#include <string.h>
+#include <stdlib.h>
 
-//*****************************************************************************
-//
-// Application Name     -   Provisioning AP
-// Application Overview -   This is a sample application demonstrating how to
-//                          provision a CC3200 device.
-//
-//*****************************************************************************
-
-
-//****************************************************************************
-//
-//! \addtogroup simplelink_provisioning
-//! @{
-//
-//****************************************************************************
-
-// Simplelink includes
-#include "simplelink.h"
-
-//Driverlib includes
+// Driverlib includes
 #include "hw_types.h"
-#include "hw_ints.h"
 #include "hw_memmap.h"
+#include "hw_common_reg.h"
+#include "hw_ints.h"
+#include "spi.h"
 #include "rom.h"
 #include "rom_map.h"
-#include "interrupt.h"
-#include "prcm.h"
 #include "utils.h"
-#include "timer.h"
-
-// free-rtos/TI-rtos include
-#include "osi.h"
-
-// Provisioning lib include
-#include "provisioning_api.h"
-#include "provisioning_defs.h"
-
-//Common interface includes
-#include "pinmux.h"
-#include "gpio_if.h"
+#include "prcm.h"
+#include "uart.h"
+#include "interrupt.h"
 #include "common.h"
 #include "timer_if.h"
-#ifndef NOTERM
+#include "timer.h"
+#include "gpio.h"
+#include "hw_gprcm.h"
+#include "pin.h"
+#include "adc.h"
+#include "i2c_if.h"
+
+// Common interface includes
 #include "uart_if.h"
-#endif
-
-#define TASK_PRIORITY                          (1)
-#define OSI_STACK_SIZE                   (2048)
-#define SPAWN_TASK_PRIORITY     9
-
-#define APPLICATION_NAME        "AP Provisioning"
-#define APPLICATION_VERSION     "1.4.0"
+#include "pin_mux_config.h"
 
 
-#define WLAN_DEL_ALL_PROFILES   0xFF
 
 
-#define SL_PARAM_PRODUCT_VERSION_DATA 	"R1.0"
-#define PROVISIONING_TIMEOUT            300 //Number of seconds to wait for provisioning completion
 
-// Application specific status/error codes
-typedef enum{
-    // Choosing -0x7D0 to avoid overlap w/ host-driver's error codes
-    LAN_CONNECTION_FAILED = -0x7D0,
-    DEVICE_NOT_IN_STATION_MODE = LAN_CONNECTION_FAILED - 1,
-    STATUS_CODE_MAX = -0xBB8
-}e_AppStatusCodes;
+// Application Master/Slave mode selector macro
+//
+// MASTER_MODE = 1 : Application in master mode
+
+#define MASTER_MODE      1
+
+#define SPI_IF_BIT_RATE  100000
+#define TR_BUFF_SIZE     128
+#define adcSamplesNumber 20000   //to trace a whole period @10hz, 6250samples are needed.
 
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- Start
 //*****************************************************************************
-volatile unsigned long  g_ulStatus = 0;//SimpleLink Status
-unsigned long  g_ulGatewayIP = 0; //Network Gateway IP address
-unsigned long  g_ulStaIp = 0;
-unsigned char  g_ucConnectionSSID[SSID_LEN_MAX+1]; //Connection SSID
-unsigned char  g_ucConnectionBSSID[BSSID_LEN_MAX]; //Connection BSSID
+unsigned short controlReg1=0b0010000100000000;    //reset=1,two word write follows
+unsigned short freq0Msbs;
+unsigned short freq0Lsbs;
+unsigned short reset1=0b0000000100000000;
+unsigned short reset0=0b0000000000000000;
+int startFreq;
+float ohm;
+unsigned int iohm;
+unsigned short valAdc1[adcSamplesNumber][2],valAdc2[adcSamplesNumber][2],test1;
+unsigned short D;//AD5272 digital wiper value
+unsigned long x;
+float ms,y;
+unsigned char i2cBuf[TR_BUFF_SIZE];
 
-unsigned long 	g_ulTimerA2Base;
-_u8 volatile g_TimerATimedOut;
-_u8 volatile g_TimerBTimedOut;
+//****************************************************************************
+//                      LOCAL FUNCTION PROTOTYPES
+//****************************************************************************
+static void BoardInit();
+int getStartFreq(void);
+int getEndFreq(void);
+int getStepFreq(void);
+int selectMode(void);
+float tdif(unsigned long int m);
+void configTA2(void);
+void adcSetup(void);
+void digResSetup(void);
+static void adint3(void);
+static void adint1(void);
+static void countdownTimerInt(void);
+static tBoolean TA1running;
+static int adcIndex1,adcIndex3;
+void configTA1(void);
+void start12_5hz(void);
 
 #if defined(ccs)
 extern void (* const g_pfnVectors[])(void);
@@ -126,613 +90,254 @@ extern uVectorEntry __vector_table;
 //                 GLOBAL VARIABLES -- End
 //*****************************************************************************
 
-
-//****************************************************************************
-//                      LOCAL FUNCTION PROTOTYPES
-//****************************************************************************
-int startProvisioning();
-static void BoardInit(void);
-static void InitializeAppVariables();
-
-//*****************************************************************************
-// SimpleLink Asynchronous Event Handlers -- Start
-//*****************************************************************************
-
-
-//*****************************************************************************
-//
-//! \brief The Function Handles WLAN Events
-//!
-//! \param[in]  pWlanEvent - Pointer to WLAN Event Info
-//!
-//! \return None
-//!
-//*****************************************************************************
-void SimpleLinkWlanEventHandler(SlWlanEvent_t *pWlanEvent)
-{
-    if(!pWlanEvent)
+void selectGain(){
+    int i2cret=0;
+    int iInput = 0;
+    char acCmdStore[50];
+    int lRetVal;
+    unsigned short D;//AD5272 digital wiper value
+    float ohm;
+    unsigned int iohm;
+    UART_PRINT("Select gain: \n\r1- g=10.02 \n\r2- g=102.07 \n\r3- g=506.262");
+    //D=56: ~5474ohm,g=10,02 ,  D=5:~489ohm,g=~102.07,  D=1:~97ohm, g=506.262
+    do
     {
-        return;
+        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
+        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
+        else{
+            iInput  = (int)strtoul(acCmdStore,0,10);
+            if(iInput<=0 || iInput>3){
+                  UART_PRINT("Wrong input,try again");
+                }
+            else break;
+        }
+    }while(true);
+    switch(iInput){
+    case 1:
+        D=56;
+        break;
+    case 2:
+        D=5;
+        break;
+    case 3:
+        D=1;
+        break;
+    default:
+        Report("Error reading gain,defaulting to 102\n\r");
+        D=5;
     }
-    switch(pWlanEvent->Event)
-    {
-        case SL_WLAN_CONNECT_EVENT:
-        {
-            SET_STATUS_BIT(g_ulStatus, STATUS_BIT_CONNECTION);
-
-            //
-            // Information about the connected AP (like name, MAC etc) will be
-            // available in 'slWlanConnectAsyncResponse_t'
-            // Applications can use it if required
-            //
-            //  slWlanConnectAsyncResponse_t *pEventData = NULL;
-            // pEventData = &pWlanEvent->EventData.STAandP2PModeWlanConnected;
-            //
-
-            // Copy new connection SSID and BSSID to global parameters
-            memcpy(g_ucConnectionSSID,pWlanEvent->EventData.
-                   STAandP2PModeWlanConnected.ssid_name,
-                   pWlanEvent->EventData.STAandP2PModeWlanConnected.ssid_len);
-            memcpy(g_ucConnectionBSSID,
-                   pWlanEvent->EventData.STAandP2PModeWlanConnected.bssid,
-                   SL_BSSID_LENGTH);
-
-            UART_PRINT("[WLAN EVENT] STA Connected to the AP: %s , "
-                       "BSSID: %x:%x:%x:%x:%x:%x\n\r",
-                      g_ucConnectionSSID,g_ucConnectionBSSID[0],
-                      g_ucConnectionBSSID[1],g_ucConnectionBSSID[2],
-                      g_ucConnectionBSSID[3],g_ucConnectionBSSID[4],
-                      g_ucConnectionBSSID[5]);
-        }
-        break;
-
-        case SL_WLAN_DISCONNECT_EVENT:
-        {
-            slWlanConnectAsyncResponse_t*  pEventData = NULL;
-
-            CLR_STATUS_BIT(g_ulStatus, STATUS_BIT_CONNECTION);
-            CLR_STATUS_BIT(g_ulStatus, STATUS_BIT_IP_AQUIRED);
-
-            pEventData = &pWlanEvent->EventData.STAandP2PModeDisconnected;
-
-            // If the user has initiated 'Disconnect' request,
-            //'reason_code' is SL_WLAN_DISCONNECT_USER_INITIATED_DISCONNECTION
-            if(SL_WLAN_DISCONNECT_USER_INITIATED_DISCONNECTION == pEventData->reason_code)
-            {
-                UART_PRINT("[WLAN EVENT]Device disconnected from the AP: %s, "
-                           "BSSID: %x:%x:%x:%x:%x:%x on application's "
-                           "request \n\r",
-                           g_ucConnectionSSID,g_ucConnectionBSSID[0],
-                           g_ucConnectionBSSID[1],g_ucConnectionBSSID[2],
-                           g_ucConnectionBSSID[3],g_ucConnectionBSSID[4],
-                           g_ucConnectionBSSID[5]);
-            }
-            else
-            {
-                UART_PRINT("[WLAN ERROR]Device disconnected from the AP AP: %s, "
-                           "BSSID: %x:%x:%x:%x:%x:%x on an ERROR..!! \n\r",
-                           g_ucConnectionSSID,g_ucConnectionBSSID[0],
-                           g_ucConnectionBSSID[1],g_ucConnectionBSSID[2],
-                           g_ucConnectionBSSID[3],g_ucConnectionBSSID[4],
-                           g_ucConnectionBSSID[5]);
-            }
-            memset(g_ucConnectionSSID,0,sizeof(g_ucConnectionSSID));
-            memset(g_ucConnectionBSSID,0,sizeof(g_ucConnectionBSSID));
-        }
-        break;
-
-        case SL_WLAN_STA_CONNECTED_EVENT:
-        {
-        	// when device is in AP mode and any client connects to device cc3xxx
-        	SET_STATUS_BIT(g_ulStatus, STATUS_BIT_CONNECTION);
-        	CLR_STATUS_BIT(g_ulStatus, STATUS_BIT_CONNECTION_FAILED);
-
-        	//
-        	// Information about the connected client (like SSID, MAC etc) will
-        	// be available in 'slPeerInfoAsyncResponse_t' - Applications
-        	// can use it if required
-        	//
-        	// slPeerInfoAsyncResponse_t *pEventData = NULL;
-        	// pEventData = &pSlWlanEvent->EventData.APModeStaConnected;
-        	//
-
-        }
-        break;
-
-        case SL_WLAN_STA_DISCONNECTED_EVENT:
-        {
-        	// when client disconnects from device (AP)
-        	CLR_STATUS_BIT(g_ulStatus, STATUS_BIT_CONNECTION);
-        	CLR_STATUS_BIT(g_ulStatus, STATUS_BIT_IP_LEASED);
-
-        	//
-        	// Information about the connected client (like SSID, MAC etc) will
-        	// be available in 'slPeerInfoAsyncResponse_t' - Applications
-        	// can use it if required
-        	//
-        	// slPeerInfoAsyncResponse_t *pEventData = NULL;
-        	// pEventData = &pSlWlanEvent->EventData.APModestaDisconnected;
-        	//
-        }
-        break;
-
-
-        default:
-        {
-        	UART_PRINT("[WLAN EVENT] Unexpected event [0x%x]\n\r",
-        			pWlanEvent->Event);
-        }
-        break;
-    }
+    ohm=D*100000.0/1023;
+    iohm=ohm;
+    i2cBuf[1]=D;
+    i2cBuf[0]=(D>>8)|0x04;
+    i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC
 }
 
-//*****************************************************************************
-//
-//! \brief This function handles network events such as IP acquisition, IP
-//!           leased, IP released etc.
-//!
-//! \param[in]  pNetAppEvent - Pointer to NetApp Event Info
-//!
-//! \return None
-//!
-//*****************************************************************************
-void SimpleLinkNetAppEventHandler(SlNetAppEvent_t *pNetAppEvent)
-{
-    if(!pNetAppEvent)
+int selectMode(){
+    int iInput = 0;
+    char acCmdStore[50];
+    int lRetVal;
+    UART_PRINT("Give mode: 1-sinusoidal  2-triangle  3-square wave");
+    do
     {
-        return;
-    }
-
-    switch(pNetAppEvent->Event)
-    {
-        case SL_NETAPP_IPV4_IPACQUIRED_EVENT:
-        {
-            SlIpV4AcquiredAsync_t *pEventData = NULL;
-
-            SET_STATUS_BIT(g_ulStatus, STATUS_BIT_IP_AQUIRED);
-
-            //Ip Acquired Event Data
-            pEventData = &pNetAppEvent->EventData.ipAcquiredV4;
-
-            //Gateway IP address
-            g_ulGatewayIP = pEventData->gateway;
-
-            UART_PRINT("[NETAPP EVENT] IP Acquired: IP=%d.%d.%d.%d , "
-                       "Gateway=%d.%d.%d.%d\n\r",
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.ip,3),
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.ip,2),
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.ip,1),
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.ip,0),
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.gateway,3),
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.gateway,2),
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.gateway,1),
-            SL_IPV4_BYTE(pNetAppEvent->EventData.ipAcquiredV4.gateway,0));
+        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
+        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
+        else{
+            iInput  = (int)strtoul(acCmdStore,0,10);
+            if(iInput<=0 || iInput>3){
+                  UART_PRINT("Wrong input,try again");
+                }
+            else return iInput;
         }
-        break;
-        case SL_NETAPP_IP_LEASED_EVENT:
-        {
-        	SET_STATUS_BIT(g_ulStatus, STATUS_BIT_IP_LEASED);
-        	//UART_PRINT("[NETAPP EVENT] IP leased to a client\n\r");
-
-        	//
-        	// Information about the IP-Leased details(like IP-Leased,lease-time,
-        	// mac etc) will be available in 'SlIpLeasedAsync_t' - Applications
-        	// can use it if required
-        	//
-        	// SlIpLeasedAsync_t *pEventData = NULL;
-        	// pEventData = &pNetAppEvent->EventData.ipLeased;
-        	//
-
-        	SlIpLeasedAsync_t *pEventData = NULL;
-        	pEventData = &pNetAppEvent->EventData.ipLeased;
-        	g_ulStaIp = pEventData->ip_address;
-        	UART_PRINT("[NETAPP EVENT] IP Leased to Client: IP=%d.%d.%d.%d \n\r",
-        	                        SL_IPV4_BYTE(g_ulStaIp,3), SL_IPV4_BYTE(g_ulStaIp,2),
-        	                        SL_IPV4_BYTE(g_ulStaIp,1), SL_IPV4_BYTE(g_ulStaIp,0));
-        }
-        break;
-
-        case SL_NETAPP_IP_RELEASED_EVENT:
-        {
-        	CLR_STATUS_BIT(g_ulStatus, STATUS_BIT_IP_LEASED);
-        	UART_PRINT("[NETAPP EVENT] IP Released for Client: IP=%d.%d.%d.%d \n\r",
-        	                        SL_IPV4_BYTE(g_ulStaIp,3), SL_IPV4_BYTE(g_ulStaIp,2),
-        	                        SL_IPV4_BYTE(g_ulStaIp,1), SL_IPV4_BYTE(g_ulStaIp,0));
-
-        	//
-        	// Information about the IP-Released details (like IP-address, mac
-        	// etc) will be available in 'SlIpReleasedAsync_t' - Applications
-        	// can use it if required
-        	//
-        	// SlIpReleasedAsync_t *pEventData = NULL;
-        	// pEventData = &pNetAppEvent->EventData.ipReleased;
-        	//
-        }
-        break;
-
-        default:
-        {
-            UART_PRINT("[NETAPP EVENT] Unexpected event [0x%x] \n\r",
-                       pNetAppEvent->Event);
-        }
-        break;
-    }
+    }while(true);
 }
 
-
-//*****************************************************************************
-//
-//! \brief This function handles HTTP server events
-//!
-//! \param[in]  pServerEvent - Contains the relevant event information
-//! \param[in]    pServerResponse - Should be filled by the user with the
-//!                                      relevant response information
-//!
-//! \return None
-//!
-//****************************************************************************
-void SimpleLinkHttpServerCallback(SlHttpServerEvent_t *pHttpEvent,
-                                  SlHttpServerResponse_t *pHttpResponse)
-{
-    // Unused in this application
+int getStartFreq(){
+    int iInput = 0;
+    char acCmdStore[50];
+    int lRetVal;
+    UART_PRINT("Give start frequency in Hz(integer):");
+    do
+    {
+        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
+        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
+        else{
+            iInput  = (int)strtoul(acCmdStore,0,10);
+            if(iInput<=0 || iInput>10000000){
+                  UART_PRINT("Wrong input,try again");
+                }
+            else return iInput;
+        }
+    }while(true);
 }
 
-//*****************************************************************************
-//
-//! \brief This function handles General Events
-//!
-//! \param[in]     pDevEvent - Pointer to General Event Info
-//!
-//! \return None
-//!
-//*****************************************************************************
-void SimpleLinkGeneralEventHandler(SlDeviceEvent_t *pDevEvent)
-{
-    if(!pDevEvent)
+int getEndFreq(){
+    int iInput = 0;
+    char acCmdStore[50];
+    int lRetVal;
+    UART_PRINT("Give end frequency in Hz(integer):");
+    do
     {
-        return;
-    }
+        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
+        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
+        else{
+            iInput  = (int)strtoul(acCmdStore,0,10);
+            if(iInput<=startFreq || iInput>10000000){
+                  UART_PRINT("Wrong input,try again");
+                }
+            else return iInput;
+        }
+    }while(true);
+}
+int getStepFreq(){
+    int iInput = 0;
+    char acCmdStore[50];
+    int lRetVal;
+    UART_PRINT("Give frequency step in Hz(integer):");
+    do
+    {
+        lRetVal = GetCmd(acCmdStore, sizeof(acCmdStore));
+        if (lRetVal==0){UART_PRINT("Wrong input,try again");}
+        else{
+            iInput  = (int)strtoul(acCmdStore,0,10);
+            if(iInput<1 || iInput>10000000){
+                  UART_PRINT("Wrong input,try again");
+                }
+            else return iInput;
+        }
+    }while(true);
+}
 
+void start12_5hz(){
+    int mode=3;
+    float freq=12.5;
+    unsigned int frequencyReg=(freq*0x10000000)/20000000.0;    //make calculation as per datasheet.(mclk=20Mhz)
+    freq0Lsbs= (frequencyReg&0x3fff) | 0b0100000000000000 ;//keep the 14 LSBs and set the 2 msbs according to datasheet
+    freq0Msbs=  (frequencyReg>>14) | 0b0100000000000000 ;  //keep 14 msbs,set 2 msbs
+    GPIOPinWrite(GPIOA3_BASE, 0x40,1<<6);    //MOSFET ON. insert to the position of bit6
+    reset0=0b0000000000101000;
+    MAP_SPITransfer(GSPI_BASE,&reset1,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    MAP_SPITransfer(GSPI_BASE,&controlReg1,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    MAP_SPITransfer(GSPI_BASE,&freq0Lsbs,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    MAP_SPITransfer(GSPI_BASE,&freq0Msbs,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
+    MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
+            SPI_CS_ENABLE|SPI_CS_DISABLE);
     //
-    // Most of the general errors are not FATAL are are to be handled
-    // appropriately by the application
+    // Report to the user
     //
-    UART_PRINT("[GENERAL EVENT] - ID=[%d] Sender=[%d]\n\n",
-               pDevEvent->EventData.deviceEvent.status,
-               pDevEvent->EventData.deviceEvent.sender);
+    UART_PRINT("Outputting square @ freq :12.5Hz\n\r");
 }
 
+float tdif(unsigned long int m){
+    unsigned long h=0;
+    float k;
+    h=TimerValueGet(TIMERA0_BASE, TIMER_A);
+    if(h<m){
+        k=(m-h)*12.5/1000;
+    }
+    else{
 
+    }
+    return k;
+}
 //*****************************************************************************
 //
-//! This function handles socket events indication
+//! SPI Master mode main loop
 //!
-//! \param[in]      pSock - Pointer to Socket Event Info
+//! This function configures SPI modelue as master and enables the channel for
+//! communication
 //!
-//! \return None
-//!
-//*****************************************************************************
-void SimpleLinkSockEventHandler(SlSockEvent_t *pSock)
-{
-    if(!pSock)
-    {
-        return;
-    }
-
-    //
-    // This application doesn't work w/ socket - Events are not expected
-    //
-    switch( pSock->Event )
-    {
-        case SL_SOCKET_TX_FAILED_EVENT:
-            switch( pSock->socketAsyncEvent.SockTxFailData.status)
-            {
-                case SL_ECLOSE: 
-                    UART_PRINT("[SOCK ERROR] - close socket (%d) operation "
-                                "failed to transmit all queued packets\n\n", 
-                                    pSock->socketAsyncEvent.SockTxFailData.sd);
-                    break;
-                default: 
-                    UART_PRINT("[SOCK ERROR] - TX FAILED  :  socket %d , reason "
-                                "(%d) \n\n",
-                                pSock->socketAsyncEvent.SockTxFailData.sd, pSock->socketAsyncEvent.SockTxFailData.status);
-                  break;
-            }
-            break;
-
-        default:
-        	UART_PRINT("[SOCK EVENT] - Unexpected Event [%x0x]\n\n",pSock->Event);
-          break;
-    }
-}
-
-
-//*****************************************************************************
-// SimpleLink Asynchronous Event Handlers -- End
-//*****************************************************************************
-
-void generalTimeoutHandler(void)
-{
-    Timer_IF_InterruptClear(TIMERA1_BASE);
-    g_TimerBTimedOut++;
-}
-
-// General waiting function using timer
-void waitmSec(_i32 timeout)
-{
-    //Initializes & Starts timer
-    Timer_IF_Init(PRCM_TIMERA1, TIMERA1_BASE, TIMER_CFG_ONE_SHOT, TIMER_A, 0);
-    Timer_IF_IntSetup(TIMERA1_BASE, TIMER_A, generalTimeoutHandler);
-
-    g_TimerBTimedOut = 0;
-
-    Timer_IF_Start(TIMERA1_BASE, TIMER_A, timeout);
-
-    while(g_TimerBTimedOut != 1)
-    {
-        // waiting...
-#ifndef SL_PLATFORM_MULTI_THREADED
-        _SlNonOsMainLoopTask();
-#endif
-    }
-
-    //Stops timer
-    Timer_IF_Stop(TIMERA1_BASE, TIMER_A);
-    Timer_IF_DeInit(TIMERA1_BASE, TIMER_A);
-}
-
-void timeoutHandler(void)
-{
-    Timer_IF_InterruptClear(TIMERA0_BASE);
-    g_TimerATimedOut++;
-}
-
-//*****************************************************************************
-// Provisioning Callbacks
-//*****************************************************************************
-_i8 sl_extlib_ProvEventTimeoutHdl(_u8* event, _i32 timeout)
-{
-    if(timeout == SL_EXT_PROV_WAIT_FOREVER)
-    {
-        // Waiting forever, no timeout
-        while(*event == FALSE)
-        {
-            // waiting...
-#ifndef SL_PLATFORM_MULTI_THREADED
-            _SlNonOsMainLoopTask();
-#endif
-        }
-    }
-    else
-    {
-    	//On CC3200, a value greater than 53687 will overflow the buffer,
-		//therefore divide the timeout into smaller pieces.
-		int divider = 10;
-
-		//Initializes & Starts timer
-		Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
-		Timer_IF_IntSetup(TIMERA0_BASE, TIMER_A, timeoutHandler);
-
-		g_TimerATimedOut = 0;
-
-		Timer_IF_Start(TIMERA0_BASE, TIMER_A, timeout/divider);
-
-        //Check event or wait until timeout
-        while(*event == FALSE && g_TimerATimedOut != divider)
-        {
-            // waiting...
-#ifndef SL_PLATFORM_MULTI_THREADED
-            _SlNonOsMainLoopTask();
-#endif
-        }
-
-        //Stops timer
-		Timer_IF_Stop(TIMERA0_BASE, PRCM_TIMERA0);
-		Timer_IF_DeInit(TIMERA0_BASE, PRCM_TIMERA0);
-
-		// check if timeout occured
-		if(g_TimerATimedOut == divider)
-		{
-			return -1;
-		}
-
-    }
-
-
-    return 0;
-}
-
-void sl_extlib_ProvWaitHdl(_i32 timeout)
-{
-    waitmSec(timeout);
-}
-
-
-//*****************************************************************************
+//! \return None.
 //
-//! \brief This function initializes the application variables
-//!
-//! \param    None
-//!
-//! \return None
-//!
 //*****************************************************************************
-static void InitializeAppVariables()
-{
-    g_ulStatus = 0;
-    g_ulGatewayIP = 0;
-    g_ulStaIp = 0;
-    //g_ConnectTimeoutCnt = 0;
-    memset(g_ucConnectionSSID,0,sizeof(g_ucConnectionSSID));
-    memset(g_ucConnectionBSSID,0,sizeof(g_ucConnectionBSSID));
+
+void configTA1(){   //countdown timer
+    Timer_IF_Init(PRCM_TIMERA1, TIMERA1_BASE, TIMER_CFG_ONE_SHOT, TIMER_A, 0);  //countdown timer
+    TimerControlStall(TIMERA1_BASE, TIMER_A,true);  //enable timer stall on debug breakpoint
+    Timer_IF_IntSetup(TIMERA1_BASE, TIMER_A, countdownTimerInt);
 }
 
-//*****************************************************************************
-//! \brief This function puts the device in its default state. It:
-//!           - Set the mode to STATION
-//!           - Configures connection policy to Auto and AutoSmartConfig
-//!           - Deletes all the stored profiles
-//!           - Enables DHCP
-//!           - Disables Scan policy
-//!           - Sets Tx power to maximum
-//!           - Sets power policy to normal
-//!           - Unregister mDNS services
-//!           - Remove all filters
-//!
-//! \param   none
-//! \return  On success, zero is returned. On error, negative is returned
-//*****************************************************************************
-static long ConfigureSimpleLinkToDefaultState()
+void configTA2(){
+    TimerConfigure(TIMERA2_BASE,(TIMER_CFG_SPLIT_PAIR | TIMER_CFG_A_PWM | TIMER_CFG_B_PWM));
+    TimerLoadSet(TIMERA2_BASE,TIMER_B,0x0003); //50ns period
+    TimerPrescaleSet(TIMERA2_BASE,TIMER_B,0x00);
+    TimerMatchSet(TIMERA2_BASE, TIMER_B,0x0001);
+    TimerPrescaleMatchSet(TIMERA2_BASE, TIMER_B,0x00);  //switch to low in 25ns
+    //TimerControlStall(TIMERA2_BASE, TIMER_BOTH,true);
+    TimerEnable(TIMERA2_BASE,TIMER_BOTH);
+}
+
+void digResSetup(void){
+    int i2cret=0;
+    i2cBuf[1]=0X02;
+    i2cBuf[0]=0X1c;
+    i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);  //WRITE CONTROL REG FOR RDAC ENABLE
+    i2cBuf[1]=5;
+    i2cBuf[0]=(5>>8)|0x04;
+    i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC FOR GAIN=~102 FOR STARTERS
+}
+
+void adcSetup(){
+    // clear data
+    while(ADCFIFOLvlGet(ADC_BASE, ADC_CH_3)) {
+        ADCFIFORead(ADC_BASE, ADC_CH_3);}
+    while(ADCFIFOLvlGet(ADC_BASE, ADC_CH_1)) {
+        ADCFIFORead(ADC_BASE, ADC_CH_1);}
+
+// initialize ADC on channel 3 and 1
+    ADCDisable(ADC_BASE);
+    ADCTimerConfig(ADC_BASE,0x1ffff);  //or 20000?
+    ADCTimerEnable(ADC_BASE);
+    ADCIntClear(ADC_BASE, ADC_CH_3,0xf);
+    ADCIntEnable(ADC_BASE, ADC_CH_3,ADC_FIFO_FULL);
+    ADCIntRegister(ADC_BASE, ADC_CH_3,adint3);
+    ADCIntClear(ADC_BASE, ADC_CH_1,0xf);
+    ADCIntEnable(ADC_BASE, ADC_CH_1,ADC_FIFO_FULL);
+    ADCIntRegister(ADC_BASE, ADC_CH_1,adint1);
+    ADCChannelEnable(ADC_BASE, ADC_CH_3);
+    ADCChannelEnable(ADC_BASE, ADC_CH_1);
+}
+
+static void adint1()
+{   unsigned long Status = ADCIntStatus(ADC_BASE, ADC_CH_1);
+    ADCIntClear(ADC_BASE, ADC_CH_1,0x1f);
+    Status = ADCIntStatus(ADC_BASE, ADC_CH_1);
+    //while(!ADCFIFOLvlGet(ADC_BASE, ADC_CH_1));    //no need
+    valAdc1[adcIndex1][0] = ADCFIFORead(ADC_BASE, ADC_CH_1) & 0x3FFF;
+    valAdc1[adcIndex1][0] = valAdc1[adcIndex1][0] >> 2;
+
+    valAdc1[adcIndex1][1]=ADCTimerValueGet(ADC_BASE);  //GET TIMESTAMP. 640 timer ticks is a sampling cycle.
+    adcIndex1++;
+/*        if(adcIndex==(adcSamplesNumber-1)){   //maybe should disable in adint3 only,where the final point is taken
+        measure=false;
+        ADCDisable(ADC_BASE);
+    }*/
+}
+
+static void adint3()
+{   unsigned long Status = ADCIntStatus(ADC_BASE, ADC_CH_3);
+    ADCIntClear(ADC_BASE, ADC_CH_3,0x1f);
+    //while(!ADCFIFOLvlGet(ADC_BASE, ADC_CH_3));    //no need
+    valAdc1[adcIndex1][0] = ADCFIFORead(ADC_BASE, ADC_CH_3) & 0x3FFF;
+    valAdc1[adcIndex1][0] = valAdc1[adcIndex1][0] >> 2;
+
+    valAdc1[adcIndex1][1]=ADCTimerValueGet(ADC_BASE);
+    adcIndex1++;
+}
+
+static void countdownTimerInt()
 {
-    SlVersionFull   ver = {0};
-    _WlanRxFilterOperationCommandBuff_t  RxFilterIdMask = {0};
-
-    unsigned char ucVal = 1;
-    unsigned char ucConfigOpt = 0;
-    unsigned char ucConfigLen = 0;
-    unsigned char ucPower = 0;
-
-    long lRetVal = -1;
-    long lMode = -1;
-
-    lMode = sl_Start(0, 0, 0);
-    ASSERT_ON_ERROR(lMode);
-
-    // If the device is not in station-mode, try configuring it in station-mode 
-    if (ROLE_STA != lMode)
-    {
-        if (ROLE_AP == lMode)
-        {
-            // If the device is in AP mode, we need to wait for this event 
-            // before doing anything 
-            while(!IS_IP_ACQUIRED(g_ulStatus))
-            {
-#ifndef SL_PLATFORM_MULTI_THREADED
-              _SlNonOsMainLoopTask(); 
-#endif
-            }
-        }
-
-        // Switch to STA role and restart 
-        lRetVal = sl_WlanSetMode(ROLE_STA);
-        ASSERT_ON_ERROR(lRetVal);
-
-        lRetVal = sl_Stop(0xFF);
-        ASSERT_ON_ERROR(lRetVal);
-
-        lRetVal = sl_Start(0, 0, 0);
-        ASSERT_ON_ERROR(lRetVal);
-
-        // Check if the device is in station again 
-        if (ROLE_STA != lRetVal)
-        {
-            // We don't want to proceed if the device is not coming up in STA-mode 
-            return DEVICE_NOT_IN_STATION_MODE;
-        }
+    if (TimerIntStatus(TIMERA1_BASE,true)==0x1){   // timeout int has happened
+        unsigned int x5=TimerValueGet(TIMERA1_BASE, TIMER_A);
+        TimerIntClear(TIMERA1_BASE,TIMER_TIMA_TIMEOUT);
+        ADCDisable(ADC_BASE);    //STop in case it's measuring
+        TA1running=false;
     }
-    
-    // Get the device's version-information
-    ucConfigOpt = SL_DEVICE_GENERAL_VERSION;
-    ucConfigLen = sizeof(ver);
-    lRetVal = sl_DevGet(SL_DEVICE_GENERAL_CONFIGURATION, &ucConfigOpt, 
-                                &ucConfigLen, (unsigned char *)(&ver));
-    ASSERT_ON_ERROR(lRetVal);
-    
-    UART_PRINT("Host Driver Version: %s\n\r",SL_DRIVER_VERSION);
-    UART_PRINT("Build Version %d.%d.%d.%d.31.%d.%d.%d.%d.%d.%d.%d.%d\n\r",
-    ver.NwpVersion[0],ver.NwpVersion[1],ver.NwpVersion[2],ver.NwpVersion[3],
-    ver.ChipFwAndPhyVersion.FwVersion[0],ver.ChipFwAndPhyVersion.FwVersion[1],
-    ver.ChipFwAndPhyVersion.FwVersion[2],ver.ChipFwAndPhyVersion.FwVersion[3],
-    ver.ChipFwAndPhyVersion.PhyVersion[0],ver.ChipFwAndPhyVersion.PhyVersion[1],
-    ver.ChipFwAndPhyVersion.PhyVersion[2],ver.ChipFwAndPhyVersion.PhyVersion[3]);
-
-    // Set connection policy to Auto + SmartConfig 
-    //      (Device's default connection policy)
-    lRetVal = sl_WlanPolicySet(SL_POLICY_CONNECTION, 
-                                SL_CONNECTION_POLICY(1, 0, 0, 0, 1), NULL, 0);
-    ASSERT_ON_ERROR(lRetVal);
-
-    // Remove all profiles
-    lRetVal = sl_WlanProfileDel(0xFF);
-    ASSERT_ON_ERROR(lRetVal);
-
-    
-
-    //
-    // Device in station-mode. Disconnect previous connection if any
-    // The function returns 0 if 'Disconnected done', negative number if already
-    // disconnected Wait for 'disconnection' event if 0 is returned, Ignore 
-    // other return-codes
-    //
-    lRetVal = sl_WlanDisconnect();
-    if(0 == lRetVal)
-    {
-        // Wait
-        while(IS_CONNECTED(g_ulStatus))
-        {
-#ifndef SL_PLATFORM_MULTI_THREADED
-              _SlNonOsMainLoopTask(); 
-#endif
-        }
-    }
-
-    // Enable DHCP client
-    lRetVal = sl_NetCfgSet(SL_IPV4_STA_P2P_CL_DHCP_ENABLE,1,1,&ucVal);
-    ASSERT_ON_ERROR(lRetVal);
-
-    // Disable scan
-    ucConfigOpt = SL_SCAN_POLICY(0);
-    lRetVal = sl_WlanPolicySet(SL_POLICY_SCAN , ucConfigOpt, NULL, 0);
-    ASSERT_ON_ERROR(lRetVal);
-
-    // Set Tx power level for station mode
-    // Number between 0-15, as dB offset from max power - 0 will set max power
-    ucPower = 0;
-    lRetVal = sl_WlanSet(SL_WLAN_CFG_GENERAL_PARAM_ID, 
-            WLAN_GENERAL_PARAM_OPT_STA_TX_POWER, 1, (unsigned char *)&ucPower);
-    ASSERT_ON_ERROR(lRetVal);
-
-    // Set PM policy to normal
-    lRetVal = sl_WlanPolicySet(SL_POLICY_PM , SL_NORMAL_POLICY, NULL, 0);
-    ASSERT_ON_ERROR(lRetVal);
-
-    // Unregister mDNS services
-    lRetVal = sl_NetAppMDNSUnRegisterService(0, 0);
-    ASSERT_ON_ERROR(lRetVal);
-
-    // Remove  all 64 filters (8*8)
-    memset(RxFilterIdMask.FilterIdMask, 0xFF, 8);
-    lRetVal = sl_WlanRxFilterSet(SL_REMOVE_RX_FILTER, (_u8 *)&RxFilterIdMask,
-                       sizeof(_WlanRxFilterOperationCommandBuff_t));
-    ASSERT_ON_ERROR(lRetVal);
-
-    lRetVal = sl_Stop(SL_STOP_TIMEOUT);
-    ASSERT_ON_ERROR(lRetVal);
-
-    InitializeAppVariables();
-    
-    return lRetVal; // Success
 }
-
-//*****************************************************************************
-//
-//! Application startup display on UART
-//!
-//! \param  none
-//!
-//! \return none
-//!
-//*****************************************************************************
-static void
-DisplayBanner(char * AppName)
-{
-    Report("\n\n\n\r");
-    Report("\t\t *************************************************\n\r");
-    Report("\t\t       CC3200 %s Application       \n\r", AppName);
-    Report("\t\t *************************************************\n\r");
-    Report("\n\n\n\r");
-}
-
 //*****************************************************************************
 //
 //! Board Initialization & Configuration
@@ -745,11 +350,11 @@ DisplayBanner(char * AppName)
 static void
 BoardInit(void)
 {
-	// In case of TI-RTOS vector table is initialize by OS itself
+/* In case of TI-RTOS vector table is initialize by OS itself */
 #ifndef USE_TIRTOS
-    //
-    // Set vector table base
-    //
+  //
+  // Set vector table base
+  //
 #if defined(ccs)
     MAP_IntVTableBaseSet((unsigned long)&g_pfnVectors[0]);
 #endif
@@ -768,202 +373,197 @@ BoardInit(void)
 
 //*****************************************************************************
 //
-//! \brief Function for handling provisioning (adding a profile to a new AP).
+//! Main function for spi demo application
 //!
-//! This function assumes running mostly on first time configurations, so
-//! one time settings are handled here.
+//! \param none
 //!
-//! \param[in]		None
-//!
-//! \return         None
-//!
+//! \return None.
+//
 //*****************************************************************************
-int startProvisioning(void)
+void main()
 {
-	long				lRetVal = -1;
-	long 				FileHandle = 0;
-	slExtLibProvCfg_t	cfg;
-	SlFsFileInfo_t 		FsFileInfo;
-
-
-	UART_PRINT("Starting Provisioning..\n\r");
-
-
-	// Enable RX Statistics
-	sl_WlanRxStatStart();
-
-	// Check if version token file exists in the device FS.
-	// If not, than create a file and write the required token
-
-	// Creating the param_product_version.txt file once
-	if (SL_FS_ERR_FILE_NOT_EXISTS == sl_FsGetInfo(SL_FILE_PARAM_PRODUCT_VERSION, 0 , &FsFileInfo))
-	{
-		sl_FsOpen(SL_FILE_PARAM_PRODUCT_VERSION, FS_MODE_OPEN_CREATE(100, _FS_FILE_OPEN_FLAG_COMMIT), NULL, &FileHandle);
-		sl_FsWrite(FileHandle, NULL, SL_PARAM_PRODUCT_VERSION_DATA, strlen(SL_PARAM_PRODUCT_VERSION_DATA));
-		sl_FsClose(FileHandle, NULL, NULL, NULL);
-	}
-
-	// Creating the config result file once
-	if (SL_FS_ERR_FILE_NOT_EXISTS == sl_FsGetInfo(SL_FILE_PARAM_CFG_RESULT, 0 , &FsFileInfo))
-	{
-		sl_FsOpen(SL_FILE_PARAM_CFG_RESULT, FS_MODE_OPEN_CREATE(100, _FS_FILE_OPEN_FLAG_COMMIT), NULL, &FileHandle);
-		sl_FsWrite(FileHandle, NULL, GET_CFG_RESULT_TOKEN, strlen(GET_CFG_RESULT_TOKEN));
-		sl_FsClose(FileHandle, NULL, NULL, NULL);
-	}
-
-	// Creating the param device name file once/
-	if (SL_FS_ERR_FILE_NOT_EXISTS == sl_FsGetInfo(SL_FILE_PARAM_DEVICE_NAME, 0 , &FsFileInfo))
-	{
-		sl_FsOpen(SL_FILE_PARAM_DEVICE_NAME, FS_MODE_OPEN_CREATE(100, _FS_FILE_OPEN_FLAG_COMMIT), NULL, &FileHandle);
-		sl_FsWrite(FileHandle, NULL, GET_DEVICE_NAME_TOKEN, strlen(GET_DEVICE_NAME_TOKEN));
-		sl_FsClose(FileHandle, NULL, NULL, NULL);
-	}
-
-	// Creating the netlist name file once/
-	if (SL_FS_ERR_FILE_NOT_EXISTS == sl_FsGetInfo(SL_FILE_NETLIST, 0 , &FsFileInfo))
-	{
-		sl_FsOpen(SL_FILE_NETLIST, FS_MODE_OPEN_CREATE(100, _FS_FILE_OPEN_FLAG_COMMIT), NULL, &FileHandle);
-		sl_FsWrite(FileHandle, NULL, SL_SET_NETLIST_TOKENS, strlen(SL_SET_NETLIST_TOKENS));
-		sl_FsClose(FileHandle, NULL, NULL, NULL);
-	}
-
-	// Initializes configuration
-	cfg.IsBlocking         = 1;    //Unused
-	cfg.AutoStartEnabled   = 0;
-	cfg.Timeout10Secs      = PROVISIONING_TIMEOUT/10;
-	cfg.ModeAfterFailure   = ROLE_STA;
-	cfg.ModeAfterTimeout   = ROLE_STA;
-
-	lRetVal = sl_extlib_ProvisioningStart(ROLE_STA, &cfg);
-	ASSERT_ON_ERROR(lRetVal);
-
-	// Wait for WLAN Event
-	while((!IS_CONNECTED(g_ulStatus)) || (!IS_IP_ACQUIRED(g_ulStatus)))
-	{
-        // waiting...
-#ifndef SL_PLATFORM_MULTI_THREADED
-        _SlNonOsMainLoopTask();
-#endif
-	}
-
-	//
-	// Turn ON the RED LED to indicate connection success
-	//
-	GPIO_IF_LedOn(MCU_RED_LED_GPIO);
-
-	//wait for few moments
-	MAP_UtilsDelay(80000000);
-
-	return SUCCESS;
-}
-
-static void SimpleEmail(void *pvParameters)
-{
-    long lRetVal = -1;
-    //
-      // Following function configure the device to default state by cleaning
-      // the persistent settings stored in NVMEM (viz. connection profiles &
-      // policies, power policy etc)
-      //
-      // Applications may choose to skip this step if the developer is sure
-      // that the device is in its default state at start of applicaton
-      //
-      // Note that all profiles and persistent settings that were done on the
-      // device will be lost
-      //
-      lRetVal = ConfigureSimpleLinkToDefaultState();
-      if(lRetVal < 0)
-      {
-          if (DEVICE_NOT_IN_STATION_MODE == lRetVal)
-              UART_PRINT("Failed to configure the device in its "
-                            "default state \n\r");
-
-          LOOP_FOREVER();
-      }
-
-      UART_PRINT("Device is configured in default state \n\r");
-
-      CLR_STATUS_BIT_ALL(g_ulStatus);
-
-      //Start simplelink
-      lRetVal = sl_Start(0,0,0);
-      if (lRetVal < 0 || ROLE_STA != lRetVal)
-      {
-          UART_PRINT("Failed to start the device \n\r");
-          LOOP_FOREVER();
-      }
-
-      UART_PRINT("Device started as STATION \n\r");
-
-      // Connect to our AP using SmartConfig method
-      lRetVal = startProvisioning();
-      if(lRetVal < 0)
-      {
-          ERR_PRINT(lRetVal);
-      }
-      else
-      {
-          UART_PRINT("Provisioning Succedded \n\r");
-      }
-
-      LOOP_FOREVER();
-}
-
-
-int main(void)
-{
-    long lRetVal = -1;
+    int i2cret=0;
+    long spiRet=0;
     //
     // Initialize Board configurations
     //
-
     BoardInit();
+
     //
-    // Configure the pinmux settings for the peripherals exercised
+    // Muxing UART and SPI lines.
     //
     PinMuxConfig();
 
-#ifndef NOTERM
+    //
+    // Initialising the Terminal.
+    //
     InitTerm();
-#endif
 
     //
-	// Display banner
-	//
-	DisplayBanner(APPLICATION_NAME);
-
-    // configure RED LED
-    GPIO_IF_LedConfigure(LED1);
-
-    GPIO_IF_LedOff(MCU_RED_LED_GPIO);
-
-    InitializeAppVariables();
+    // Clearing the Terminal.
+    //
+    ClearTerm();
 
     //
-    // Simplelinkspawntask
+    // Display the Banner
     //
-    lRetVal = VStartSimpleLinkSpawnTask(SPAWN_TASK_PRIORITY);
-    if(lRetVal < 0)
-    {
-        ERR_PRINT(lRetVal);
-        LOOP_FOREVER();
+    UART_PRINT("\n\n\n\r");
+    UART_PRINT("\t\t   ********************************************\n\r");
+    UART_PRINT("\t\t        CC3200 SPI EIS  \n\r");
+    UART_PRINT("\t\t   ********************************************\n\r");
+    UART_PRINT("\n\n\n\r");
+
+    //
+    // Reset the peripheral
+    //
+    MAP_PRCMPeripheralReset(PRCM_GSPI);
+
+
+    //
+    // I2C Init
+    //
+    I2C_IF_Open(I2C_MASTER_MODE_FST);
+
+
+/*    // FOR WHEN WE WANT TO CHANGE TO ADC FOR TRIANGLE & SINUSOIDAL:
+    // Configure PIN_57 for ADC0 ADC_CH0
+    //
+    PinTypeADC(PIN_57, PIN_MODE_255);
+    //
+    // Configure PIN_59 for ADC0 ADC_CH2
+    //
+    PinTypeADC(PIN_59, PIN_MODE_255);*/
+
+
+    //OUTPUT 20Mhz clock from p64:
+    configTA2();
+
+    adcSetup();
+    configTA1();  //countdown timer
+    digResSetup();
+
+    unsigned int frequencyReg=0;
+    int freq=0;
+    int endFreq=0;
+    int stepFreq=0;
+    int mode=0;
+
+    //
+    // Reset SPI
+    //
+    MAP_SPIReset(GSPI_BASE);
+
+    //
+    // Configure SPI interface
+    //
+    MAP_SPIConfigSetExpClk(GSPI_BASE,MAP_PRCMPeripheralClockGet(PRCM_GSPI),
+                     SPI_IF_BIT_RATE,SPI_MODE_MASTER,SPI_SUB_MODE_2,
+                     (SPI_SW_CTRL_CS |
+                     SPI_4PIN_MODE |
+                     SPI_TURBO_OFF |
+                     SPI_CS_ACTIVELOW |
+                     SPI_WL_16));
+
+    //
+    // Enable SPI for communication
+    //
+    MAP_SPIEnable(GSPI_BASE);
+
+    UART_PRINT("Enabled SPI Interface in Master Mode\n\r");
+    //
+    // Send the strings to slave. Chip Select(CS) needs to be
+    // asserted at start of transfer and deasserted at the end.
+    //
+    start12_5hz();
+    while(true){
+        selectGain();
+        mode=selectMode();
+        startFreq=getStartFreq();
+        endFreq=getEndFreq();
+        stepFreq=getStepFreq();
+
+        switch(mode){
+        case 1:
+            GPIOPinWrite(GPIOA3_BASE, 0x40,0);   //MOSFET OFF
+            reset0=0b0000000000000000;  //set the mode at this reset de-assertion command
+            break;
+        case 2:
+            GPIOPinWrite(GPIOA3_BASE, 0x40,0);
+            reset0=0b0000000000000010;
+            break;
+        case 3:                                     //MOSFET ON
+            GPIOPinWrite(GPIOA3_BASE, 0x40,1<<6);    //insert to the position of bit6
+            reset0=0b0000000000101000;
+            break;
+        default:
+            Report("Error reading mode,defaulting to sinusoidal\n\r");
+            GPIOPinWrite(GPIOA3_BASE, 0x40,0);
+            reset0=0b0000000000000000;
+        }
+        freq=startFreq;
+        while(freq<=endFreq){   //CLK FREQ is 20MHZ:
+            frequencyReg=(freq/20000000.0)*0x10000000;    //get frequency via UART, and make calculation as per datasheet.(mclk=20Mhz)
+            freq0Lsbs= (frequencyReg&0x3fff) | 0b0100000000000000 ;//keep the 14 LSBs and set the 2 msbs according to datasheet
+            freq0Msbs=  (frequencyReg>>14) | 0b0100000000000000 ;  //keep 14 msbs,set 2 msbs
+
+            spiRet=MAP_SPITransfer(GSPI_BASE,&reset1,0,2,
+                    SPI_CS_ENABLE|SPI_CS_DISABLE);
+            spiRet=MAP_SPITransfer(GSPI_BASE,&controlReg1,0,2,
+                    SPI_CS_ENABLE|SPI_CS_DISABLE);
+            spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Lsbs,0,2,
+                    SPI_CS_ENABLE|SPI_CS_DISABLE);
+            spiRet=MAP_SPITransfer(GSPI_BASE,&freq0Msbs,0,2,
+                    SPI_CS_ENABLE|SPI_CS_DISABLE);
+            spiRet=MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
+                    SPI_CS_ENABLE|SPI_CS_DISABLE);
+            //
+            // Report to the user
+            //
+            UART_PRINT("Sweeping @ freq :%dHz\n\r",freq);
+
+
+
+            //MAP_UtilsDelay(80000.0/6);               //wait for DDS. datasheet says wait 8 MCLK cycles. Worst case if 1Mhz,wait 640 cc3200 cycles.
+            TA1running=true;
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,79); //  1us,worst case
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            while(TA1running==true);
+
+
+            adcIndex1=0;
+            adcIndex3=0;
+            TA1running=true;
+
+/*
+            //32bit timer init for measuring...
+            Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
+            TimerControlStall(TIMERA0_BASE, TIMER_A,true);  //enable timer stall on debug breakpoint
+            TimerLoadSet(TIMERA0_BASE,TIMER_A,0xffffffff);
+            TimerEnable(TIMERA0_BASE,TIMER_A);
+            x=TimerValueGet(TIMERA0_BASE, TIMER_A); //time reference.warning this method of time measurement can be max ~55s
+*/
+
+
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(10000.0/freq)); //  1/freq = 1 period. TODO: CHANGED 1000->10000
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            ADCEnable(ADC_BASE);    //START TO MEASURE
+            while(TA1running==true);
+
+
+/*            y=tdif(x);  //us
+            ms=y/1000;  //ms
+            TimerDisable(TIMERA0_BASE,TIMER_A);*/
+
+            freq+=stepFreq; //next frequency
+
+        }
+        UART_PRINT("Sweep finished\n\r");
     }
-
-    lRetVal = osi_TaskCreate(SimpleEmail, (signed char*)"SimpleEmail", \
-                                    OSI_STACK_SIZE, \
-                                    NULL, TASK_PRIORITY+1, NULL );
-    if(lRetVal < 0)
-    {
-        ERR_PRINT(lRetVal);
-        LOOP_FOREVER();
-    }
-
-    osi_start();
 
     while(1)
     {
 
     }
 
-
 }
+
