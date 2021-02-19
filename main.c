@@ -114,7 +114,7 @@ void changeGain(unsigned short d){//d=AD5272 digital wiper value
     i2cBuf[1]=d;
     i2cBuf[0]=(d>>8)|0x04;
     i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC
-    MAP_UtilsDelay(1000);               //TODO:TWEAK. wait for DIGRES. maybe use delay timer like below,...
+    MAP_UtilsDelay(1000);               // wait for DIGRES.
 }
 
 void waitForEnter(){
@@ -215,7 +215,7 @@ void startatFreq(float Freq ){
             SPI_CS_ENABLE|SPI_CS_DISABLE);
     spiRet=MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
             SPI_CS_ENABLE|SPI_CS_DISABLE);
-    MAP_UtilsDelay(1000);               //TODO:TWEAK. wait for DDS. datasheet says wait 8 MCLK cycles. Worst case if 1Mhz,wait 640 cc3200 cycles.maybe use delay timer like below,...
+    MAP_UtilsDelay(1000);               //wait for DDS. datasheet says wait 8 MCLK cycles. Worst case if 1Mhz,wait 640 cc3200 cycles.
 
 }
 
@@ -223,11 +223,11 @@ void startatFreq(float Freq ){
 
 //new. Median filter according to wikipedia. Change each value according to its neigborhood's median. No need to change the timestamps.
 void smoothenAndEvaluate(){
-    //TODO:testing for smoothingInterval=3,increase if needed. needs to BE ODD.we are taking the MEDIAN.
     char i3,G=3;
     int i1,i2;
     unsigned  short smoothWindow[300],temp2;//!!let smoothingInterval<300
 
+    //smoothingInterval increases with log. needs to BE ODD.we are taking the MEDIAN.
     //smoothingInterval=3;
     smoothingInterval=G*log(2*endFreq/freq);//todo:change endFreq here to 4000 since it works, permanently
     if(smoothingInterval<3) smoothingInterval=3;//limit to above 3
@@ -351,7 +351,7 @@ void smoothenAndEvaluate(){
     else{
         stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0+(adcIndex1/periodsToScan);//(from notes)add 1 period in case the 1st edge didn't get picked at the dds source signal,causing it to show 1 period later.
     }
-    pk_pk_phaseDiff[count]=360.0*freq*stampDiff*8/1e6;//todo adc timer cycle is 16us,sample for each channel every 8us
+    pk_pk_phaseDiff[count]=360.0*freq*stampDiff*8/1e6;//adc timer cycle is 16us,sample for each channel every 8us
     impedance[count]=pk_pk1[count]*1e5/2/gain;
 }
 
@@ -837,7 +837,7 @@ void main()
             adcIndex1=0;
             adcIndex0=0;
             TA1running=true;
-            if(freq<100){//todo: tweak this if for higher freqs maybe
+            if(freq<800){//todo: tweak this if for higher freqs maybe
                 periodsToScan=1.2;
                 TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
             }
@@ -880,7 +880,7 @@ void main()
             adcIndex1=0;
             adcIndex0=0;
             TA1running=true;
-            if(freq<100){//todo: tweak this if for higher freqs maybe
+            if(freq<800){//todo: tweak this if for higher freqs maybe
                 periodsToScan=1.2;
                 TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
             }
@@ -914,7 +914,7 @@ void main()
             adcIndex1=0;
             adcIndex0=0;
             TA1running=true;
-            if(freq<100){//todo: tweak this if for higher freqs maybe
+            if(freq<800){//todo: tweak this if for higher freqs maybe
                 periodsToScan=1.2;
                 TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
             }
