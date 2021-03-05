@@ -53,9 +53,8 @@ unsigned short freq0Msbs;
 unsigned short freq0Lsbs;
 unsigned short reset1=0b0000000100000000;
 unsigned short reset0=0b0000000000000000;
-int startFreq, freq,endFreq,mode;
+int startFreq, freq,endFreq;
 long long int stampDiff,minsmoothedTimestamp1,minsmoothedTimestamp0,mincounter0,mincounter1;
-static unsigned short D,Dprev;
 static unsigned short valAdc1[adcSamplesNumber],valAdc0[adcSamplesNumber],temp[adcSamplesNumber],minUnsmoothed1,minUnsmoothed0,maxUnsmoothed0,maxUnsmoothed1;
 static unsigned short minValue0,maxValue0,minValue1,maxValue1;
 static unsigned short minValuetimestamp[maxSweepFCount],maxValuetimestamp[maxSweepFCount],count;//LET 5000 be the max bumber of frequencies todo change these to single variable later to savce space
@@ -91,7 +90,6 @@ static void countdownTimerInt(void);
 void configTA1(void);
 void startatFreq(float);
 void int31(void);
-void findInitialGain(void);
 void smoothenAndEvaluate(void);
 void finalSmoothingMedian(void);
 void clearAdc(void);
@@ -116,7 +114,7 @@ void changeGain(unsigned short d){//d=AD5272 digital wiper value
     i2cBuf[1]=d;
     i2cBuf[0]=(d>>8)|0x04;
     i2cret=I2C_IF_Write(0X2E,&i2cBuf,2,1);   //WRITE RDAC
-    MAP_UtilsDelay(1000);               // wait for DIGRES.
+    MAP_UtilsDelay(1000);               //TODO:TWEAK. wait for DIGRES. maybe use delay timer like below,...
 }
 
 void waitForEnter(){
@@ -217,58 +215,19 @@ void startatFreq(float Freq ){
             SPI_CS_ENABLE|SPI_CS_DISABLE);
     spiRet=MAP_SPITransfer(GSPI_BASE,&reset0,0,2,
             SPI_CS_ENABLE|SPI_CS_DISABLE);
-    MAP_UtilsDelay(1000);               //wait for DDS. datasheet says wait 8 MCLK cycles. Worst case if 1Mhz,wait 640 cc3200 cycles.
+    MAP_UtilsDelay(1000);               //TODO:TWEAK. wait for DDS. datasheet says wait 8 MCLK cycles. Worst case if 1Mhz,wait 640 cc3200 cycles.maybe use delay timer like below,...
 
 }
 
-void findInitialGain(){
-    D=1023;
-    Dprev=D;
-    while(1){
-        changeGain(D);
-        minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
-        minUnsmoothed0=4095;
-        clipped=false;
-        adcIndex1=0;
-        adcIndex0=0;
-        TA1running=true;
-        if(freq<800){//todo: tweak this if for higher freqs maybe
-            periodsToScan=1.2;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
-        }
-        else{
-            periodsToScan=10;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   TODO:REDUCE later 10X??
-        }
-        TimerEnable(TIMERA1_BASE,TIMER_A);
-        clearAdc();
-        ADCEnable(ADC_BASE);    //START TO MEASURE
-        while(TA1running==true);
 
-        if((minUnsmoothed1<1640)||(clipped==true)){
-            D=Dprev;
-            break;
-        }
-        else{
-            Dprev=D;
-            D=D-1;//BE INCREASING GAIN UNTIL CLIPPED.
-            if(D<3){
-                D=3;
-                UART_PRINT("Sample very conductive\n\r");
-                break;
-            }
-        }
-    }
-    changeGain(D);
-}
 
 //new. Median filter according to wikipedia. Change each value according to its neigborhood's median. No need to change the timestamps.
 void smoothenAndEvaluate(){
+    //TODO:testing for smoothingInterval=3,increase if needed. needs to BE ODD.we are taking the MEDIAN.
     char i3,G=3;
     int i1,i2;
     unsigned  short smoothWindow[300],temp2;//!!let smoothingInterval<300
 
-    //smoothingInterval increases with log. needs to BE ODD.we are taking the MEDIAN.
     //smoothingInterval=3;
     smoothingInterval=G*log(2*endFreq/freq);//todo:change endFreq here to 4000 since it works, permanently
     if(smoothingInterval<3) smoothingInterval=3;//limit to above 3
@@ -278,56 +237,56 @@ void smoothenAndEvaluate(){
 
 
 
-    if(mode!=3){//no use detecting input channel edges for square waveform
-        for(i1=smoothingInterval/2;i1<(adcIndex0-smoothingInterval/2);i1++){
-            i3=0;
-            //copy values to buffer to sort them:
-            for(i2=0;i2<smoothingInterval;i2++){
-                smoothWindow[i2]=valAdc0[i1-smoothingInterval/2+i2];
-            }
-            while(i3<smoothingInterval-1){
-            i2=0;
-                while(i2<smoothingInterval-1){
-                    if (temp[i2]>temp[i2+1]){
-                        temp2=smoothWindow[i2];   //sort values with their respective timestamps
-                        smoothWindow[i2]=smoothWindow[i2+1];
-                        temp[i2+1]=temp2;
-                    }
-                i2++;
-                }
-            i3++;
-            }
-            temp[i1]=smoothWindow[smoothingInterval/2];//save median
 
+    for(i1=smoothingInterval/2;i1<(adcIndex0-smoothingInterval/2);i1++){
+        i3=0;
+        //copy values to buffer to sort them:
+        for(i2=0;i2<smoothingInterval;i2++){
+            smoothWindow[i2]=valAdc0[i1-smoothingInterval/2+i2];
         }
-        //fill array borders with first&last filtered values:
-        for(i1=0;i1<adcIndex0;i1++){
-            if (i1<=smoothingInterval/2){
-                temp[i1]=temp[smoothingInterval/2+1];
-            }
-            else if (i1>=adcIndex0-smoothingInterval/2){
-                temp[i1]=temp[adcIndex0-smoothingInterval/2-1];
-            }
-        }
-
-
-        //find edges in filtered array:
-        minValue0=temp[0];
-        maxValue0=temp[0];
-        for(i1=1;i1<adcIndex0;i1++){
-            if(temp[i1]<minValue0){
-                minValue0=temp[i1];
-                if(8.0*i1<periodus){       //use only the first sampled period of the wave for finding phase diff todo:change 8.0 to 8 and see what happens?
-                    minsmoothedTimestamp0=i1;//todo change this type to simple unsigned int
+        while(i3<smoothingInterval-1){
+        i2=0;
+            while(i2<smoothingInterval-1){
+                if (temp[i2]>temp[i2+1]){
+                    temp2=smoothWindow[i2];   //sort values with their respective timestamps
+                    smoothWindow[i2]=smoothWindow[i2+1];
+                    temp[i2+1]=temp2;
                 }
+            i2++;
+            }
+        i3++;
+        }
+        temp[i1]=smoothWindow[smoothingInterval/2];//save median
 
-                mincounter0++;
-            }
-            if(temp[i1]>maxValue0){
-                maxValue0=temp[i1];
-            }
+    }
+    //fill array borders with first&last filtered values:
+    for(i1=0;i1<adcIndex0;i1++){
+        if (i1<=smoothingInterval/2){
+            temp[i1]=temp[smoothingInterval/2+1];
+        }
+        else if (i1>=adcIndex0-smoothingInterval/2){
+            temp[i1]=temp[adcIndex0-smoothingInterval/2-1];
         }
     }
+
+
+    //find edges in filtered array:
+    minValue0=temp[0];
+    maxValue0=temp[0];
+    for(i1=1;i1<adcIndex0;i1++){
+        if(temp[i1]<minValue0){
+            minValue0=temp[i1];
+            if(8.0*i1<periodus){       //use only the first sampled period of the wave for finding phase diff todo:change 8.0 to 8 and see what happens?
+                minsmoothedTimestamp0=i1;//todo change this type to simple unsigned int
+            }
+
+            mincounter0++;
+        }
+        if(temp[i1]>maxValue0){
+            maxValue0=temp[i1];
+        }
+    }
+
 
 
 
@@ -384,22 +343,15 @@ void smoothenAndEvaluate(){
 
 
 
+    pk_pk1[count]= (maxValue1-minValue1)*1.467/4096.0;//in volts TODO:try the other formula i have written down too.
 
-    if(mode!=3){//no use detecting input channel edges for square waveform
-        if(abs(minsmoothedTimestamp1-minsmoothedTimestamp0)<abs(minsmoothedTimestamp1-minsmoothedTimestamp0+(adcIndex1/periodsToScan))){//from notes:go with the smallest abs value of phase difference.
-            stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0;
-        }
-        else{
-            stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0+(adcIndex1/periodsToScan);//(from notes)add 1 period in case the 1st edge didn't get picked at the dds source signal,causing it to show 1 period later.
-        }
-        pk_pk_phaseDiff[count]=360.0*freq*stampDiff*8/1e6;//adc timer cycle is 16us,sample for each channel every 8us
-
+    if(abs(minsmoothedTimestamp1-minsmoothedTimestamp0)<abs(minsmoothedTimestamp1-minsmoothedTimestamp0+(adcIndex1/periodsToScan))){//from notes:go with the smallest abs value of phase difference.
+        stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0;
     }
     else{
-        pk_pk_phaseDiff[count]=0;
+        stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0+(adcIndex1/periodsToScan);//(from notes)add 1 period in case the 1st edge didn't get picked at the dds source signal,causing it to show 1 period later.
     }
-
-    pk_pk1[count]= (maxValue1-minValue1)*1.467/4096.0;//in volts TODO:try the other formula i have written down too.
+    pk_pk_phaseDiff[count]=360.0*freq*stampDiff*8/1e6;//todo adc timer cycle is 16us,sample for each channel every 8us
     impedance[count]=pk_pk1[count]*1e5/2/gain;
 }
 
@@ -459,7 +411,7 @@ void finalSmoothingAverage(){
         i3=0;
         //copy values to buffer to sort them:
         for(i2=0;i2<smoothingInterval1;i2++){
-            smoothWindow[i2]=temp1[i1-smoothingInterval1/2+i2];//TODO CHANGED THIS
+            smoothWindow[i2]=pk_pk_phaseDiff[i1-smoothingInterval1/2+i2];
         }
         while(i3<smoothingInterval1-1){
         i2=0;
@@ -727,7 +679,9 @@ BoardInit(void)
 //*****************************************************************************
 void main()
 {
+    unsigned short D=0,Dprev=0;
     int stepFreq=0;
+    int mode=0;
     //
     // Initialize Board configurations
     //
@@ -810,9 +764,9 @@ void main()
     // asserted at start of transfer and deasserted at the end.
     //
 
-    mode=1;//selectMode();
     while(true){
         count=0;//counter for each fequency change
+        mode=3;//selectMode();
         startFreq=10;//getStartFreq();
         endFreq=4000;//getEndFreq();
         stepFreq=10;//getStepFreq();
@@ -868,7 +822,49 @@ void main()
         }
 
         MAP_UtilsDelay(MILLISECONDS_TO_TICKS(200));//DALAY A BIT FOR THE FIRST WAVE TO SETTLE.
-        findInitialGain();//find the starting gain in the max frequency.
+        D=1023;
+        Dprev=D;
+        while(1){
+            //MAP_UtilsDelay(10000);               //wait for DDS: datasheet says wait 8 MCLK cycles. Worst case if 1Mhz,wait 640 cc3200 cycles:
+/*            TA1running=true;
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,79); //  1us,worst case
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            while(TA1running==true);*/
+            changeGain(D);
+            minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
+            minUnsmoothed0=4095;
+            clipped=false;
+            adcIndex1=0;
+            adcIndex0=0;
+            TA1running=true;
+            if(freq<100){//todo: tweak this if for higher freqs maybe
+                periodsToScan=1.2;
+                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
+            }
+            else{
+                periodsToScan=10;
+                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   TODO:REDUCE later 10X??
+            }
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            clearAdc();
+            ADCEnable(ADC_BASE);    //START TO MEASURE
+            while(TA1running==true);
+
+            if((minUnsmoothed1<1640)||(clipped==true)){
+                D=Dprev;
+                break;
+            }
+            else{
+                Dprev=D;
+                D=D-1;//BE INCREASING GAIN UNTIL CLIPPED.
+                if(D<3){
+                    D=3;
+                    UART_PRINT("Sample very conductive\n\r");
+                    break;
+                }
+            }
+        }
+        changeGain(D);
         while(freq>=startFreq){   //CLK FREQ is 20MHZ
             periodus=(1e6)/freq;
             startatFreq(freq);//todo
@@ -884,7 +880,7 @@ void main()
             adcIndex1=0;
             adcIndex0=0;
             TA1running=true;
-            if(freq<800){//todo: tweak this if for higher freqs maybe
+            if(freq<100){//todo: tweak this if for higher freqs maybe
                 periodsToScan=1.2;
                 TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
             }
@@ -902,9 +898,8 @@ void main()
                 if(D>1023){
                     D=1023;
                 }
-                changeGain(D);
             }
-
+            changeGain(D);
 
             mincounter1=0;//todo
             mincounter0=0;
@@ -919,7 +914,7 @@ void main()
             adcIndex1=0;
             adcIndex0=0;
             TA1running=true;
-            if(freq<800){//todo: tweak this if for higher freqs maybe
+            if(freq<100){//todo: tweak this if for higher freqs maybe
                 periodsToScan=1.2;
                 TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
             }
@@ -931,7 +926,7 @@ void main()
             clearAdc();// clear data
             ADCEnable(ADC_BASE);    //START TO MEASURE
             while(TA1running==true);
-            //removeFirstValues();//TODO:use??
+            //removeFirstValues();//TODO.use??
 
             //32bit timer init for measuring...
             Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
@@ -956,23 +951,8 @@ void main()
             count+=1;
             freq-=stepFreq; //next frequency
         }
-        finalSmoothingMedian();//SMOOTHEN PHASE DIFF
-        finalSmoothingAverage();//FURTHER SMOOTHEN USING ROLLING AVG FILTER
-
-        //tests...
-        if(mode==1){
-            mode=2;
-        }
-        else if (mode==2){
-            mode=3;
-        }
-        else{
-            mode=1;
-        }
-
-
-
-
+        finalSmoothingMedian();
+        finalSmoothingAverage();
         UART_PRINT("0 Rolloff max frequency for this sample: %.1f\n\r",noRolloffFreq);
         UART_PRINT("Sweep finished\n\r");
     }
