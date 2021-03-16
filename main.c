@@ -111,7 +111,7 @@ static unsigned short valAdc1[adcSamplesNumber],valAdc0[adcSamplesNumber],temp[a
 static unsigned short minValue0,maxValue0,minValue1,maxValue1;
 static unsigned short minValuetimestamp[maxSweepFCount],maxValuetimestamp[maxSweepFCount],count,firstdata;//LET 4100 be the max bumber of frequencies todo change these to single variable later to save space
 static float pk_pk_phaseDiff[maxSweepFCount],temp1[maxSweepFCount],ohm,gain,impedance[maxSweepFCount],noRolloffFreq;
-//static float pk_pk1[maxSweepFCount];//save space
+//static float pk_pk1[maxSweepFCount];//save space TODO:
 unsigned long x,x1;
 float ms,y,periodus,periodsToScan;
 unsigned char i2cBuf[TR_BUFF_SIZE];
@@ -738,7 +738,7 @@ void configTA2(){
     TimerMatchSet(TIMERA2_BASE, TIMER_B,0x0001);
     TimerPrescaleMatchSet(TIMERA2_BASE, TIMER_B,0x00);  //switch to low in 25ns
     //TimerControlStall(TIMERA2_BASE, TIMER_BOTH,true);
-    TimerEnable(TIMERA2_BASE,TIMER_BOTH);
+    //TimerEnable(TIMERA2_BASE,TIMER_BOTH);NOT YET.INTERFERES WITH WIFI!
 }
 
 void digResSetup(void){
@@ -896,6 +896,8 @@ BoardInit(void)
 }
 
 void setupSweep(){
+        TimerEnable(TIMERA2_BASE,TIMER_BOTH);//ENABLE THE AD 9833 CLOCK HERE.INTERFERES WITH WIFI!
+        MAP_UtilsDelay(MILLISECONDS_TO_TICKS(400));//TODO:DALAY A BIT for the ad9833 to settle?
         freq=endFreq;//START FROM FINAL FREQUENCY TO BE ABLE TO ADJUST GAIN FASTER
         periodus=(1e6)/freq;
         switch(mode){
@@ -951,11 +953,13 @@ void setupSweep(){
             PinTypeADC(PIN_59, PIN_MODE_255);
         }
 
-        MAP_UtilsDelay(MILLISECONDS_TO_TICKS(200));//DALAY A BIT FOR THE FIRST WAVE TO SETTLE.
+        MAP_UtilsDelay(MILLISECONDS_TO_TICKS(400));//TODO:DALAY A BIT FOR THE FIRST WAVE TO SETTLE.
         findInitialGain();//find the starting gain in the max frequency.
 }
 
 void doSingleSweep(){
+    TimerEnable(TIMERA2_BASE,TIMER_BOTH);//ENABLE THE AD 9833 CLOCK HERE.INTERFERES WITH WIFI!
+    MAP_UtilsDelay(MILLISECONDS_TO_TICKS(400));//TODO:DALAY A BIT for the ad9833 to settle?
     count=0;//counter for each frequency change
     freq=endFreq;//START FROM FINAL FREQUENCY TO BE ABLE TO ADJUST GAIN FASTER
     while(freq>=startFreq){   //START FROM FINAL FREQ
@@ -1020,6 +1024,7 @@ void doSingleSweep(){
         clearAdc();// clear data
         ADCEnable(ADC_BASE);    //START TO MEASURE
         while(TA1running==true);
+        TimerDisable(TIMERA2_BASE,TIMER_BOTH);//TODO:DISABLE THE AD 9833 CLOCK HERE,before smoothenAndEvaluate,which takes some time. IT INTERFERES WITH WIFI!
 
         //32bit timer init for measuring...
         Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
@@ -1104,7 +1109,15 @@ int cellServer(unsigned short usPort)
     }
 
     iAddrSize = sizeof(SlSockAddrIn_t);
-
+    //OPTION, needs to be blocking
+    iStatus = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, SL_SO_NONBLOCKING,
+                            &lBlocking, sizeof(lBlocking));
+    if( iStatus < 0 )
+    {
+        // error
+        sl_Close(iSockID);
+        ASSERT_ON_ERROR(SOCKET_OPT_ERROR);
+    }
     // binding the TCP socket to the TCP server address
     iStatus = sl_Bind(iSockID, (SlSockAddr_t *)&sLocalAddr, iAddrSize);
     if( iStatus < 0 )
@@ -1140,6 +1153,15 @@ int cellServer(unsigned short usPort)
         ASSERT_ON_ERROR(ACCEPT_ERROR);
     }
     //first time we need to be blocking ,expecting first message.
+    iStatus = sl_SetSockOpt(iNewSockID, SL_SOL_SOCKET, SL_SO_NONBLOCKING,
+                            &lBlocking, sizeof(lBlocking));
+    if( iStatus < 0 )
+    {
+        // error
+        sl_Close(iNewSockID);
+        sl_Close(iSockID);
+        ASSERT_ON_ERROR(SOCKET_OPT_ERROR);
+    }
     //do{
         //_SlNonOsMainLoopTask(); //needed.
         iStatus = sl_Recv(iNewSockID, g_cBsdBuf, BUF_SIZE, 0);//}
@@ -1425,8 +1447,8 @@ void main()
     GPIOIntEnable(GPIOA3_BASE, 0x80);
 
 
-    //OUTPUT 20Mhz clock from p64:
-    //todo:this is the problem:interferes with wifi.configTA2();
+    //config to OUTPUT 20Mhz clock from p64:
+    configTA2();
 
     adcSetup();
     configTA1();  //countdown timer
