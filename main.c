@@ -1426,7 +1426,7 @@ void main()
 
 
     //OUTPUT 20Mhz clock from p64:
-    configTA2();
+    //todo:this is the problem:interferes with wifi.configTA2();
 
     adcSetup();
     configTA1();  //countdown timer
