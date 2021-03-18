@@ -1,16 +1,10 @@
-//changed finalsmoothing to output in the initial p-pphase register
-//CLK FREQ of AD9833 is 20MHZ
+
+//changed the ADC INTS TO ONLY be enabled when measuring. used to give erratic ints throughout the program.
 
 // Standard includes
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-#include <stdio.h>
-
-// simplelink includes
-#include "simplelink.h"
-#include "wlan.h"
-#include "network_if.h"
 
 // Driverlib includes
 #include "hw_types.h"
@@ -34,15 +28,10 @@
 #include "i2c_if.h"
 
 // Common interface includes
-#include "pin_mux_config.h"
-#include "udma_if.h"
-#include "common.h"
-#ifndef NOTERM
 #include "uart_if.h"
-#endif
+#include "pin_mux_config.h"
 
-// JSON Parser
-#include "jsmn.h"
+
 
 
 
@@ -56,62 +45,24 @@
 #define TR_BUFF_SIZE     128
 #define adcSamplesNumber 16000   //to trace a whole period @10hz, 6250samples are needed per channel.(twice that for the 2 channels i use per input)
 #define GBWP  1500000   //AD8226 GBWP
-#define maxSweepFCount     4100 //TODO:4000 max measurements for now
-
-#define IP_ADDR             0xc0a80167 // 192.168.1.103  doesn't matter in this project.
-#define PORT_NUM            5009    //TODO:CHANGE PORT?
-#define BUF_SIZE            100
-#define TCP_PACKET_COUNT    4000
-
-// Application specific status/error codes
-typedef enum{
-    // Choosing -0x7D0 to avoid overlap w/ host-driver's error codes
-    SOCKET_CREATE_ERROR = -0x7D0,
-    BIND_ERROR = SOCKET_CREATE_ERROR - 1,
-    LISTEN_ERROR = BIND_ERROR -1,
-    SOCKET_OPT_ERROR = LISTEN_ERROR -1,
-    CONNECT_ERROR = SOCKET_OPT_ERROR -1,
-    ACCEPT_ERROR = CONNECT_ERROR - 1,
-    SEND_ERROR = ACCEPT_ERROR -1,
-    RECV_ERROR = SEND_ERROR -1,
-    SOCKET_CLOSE_ERROR = RECV_ERROR -1,
-    DEVICE_NOT_IN_STATION_MODE = SOCKET_CLOSE_ERROR - 1,
-    STATUS_CODE_MAX = -0xBB8
-}e_AppStatusCodes;
-
-
-
+#define maxSweepFCount     5000 //TODO:5000 max measurements for now
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- Start
 //*****************************************************************************
-
-
-extern volatile unsigned long  g_ulStatus;//SimpleLink Status
-extern unsigned long  g_ulGatewayIP; //Network Gateway IP address
-extern unsigned char  g_ucConnectionSSID; //Connection SSID
-extern unsigned char  g_ucConnectionBSSID; //Connection BSSID
-unsigned long  g_ulDestinationIp = IP_ADDR;
-unsigned int   g_uiPortNum = PORT_NUM,NewSockID;
-volatile unsigned long  g_ulPacketCount = TCP_PACKET_COUNT;//NOT USED HERE
-unsigned char  g_ucConnectionStatus = 0,ucConfigOpt=0;
-unsigned char  g_ucSimplelinkstarted = 0;
-unsigned long  g_ulIpAddr = 0;
-char g_cBsdBuf[BUF_SIZE];
-
 unsigned short controlReg1=0b0010000100000000;    //reset=1,two word write follows
 unsigned short freq0Msbs;
 unsigned short freq0Lsbs;
 unsigned short reset1=0b0000000100000000;
 unsigned short reset0=0b0000000000000000;
-static int startFreq,stepFreq,freq,endFreq,mode,freqCount,interval;
+int startFreq, freq,endFreq,mode;
 long long int stampDiff,minsmoothedTimestamp1,minsmoothedTimestamp0,mincounter0,mincounter1;
 static unsigned short D,Dprev;
 static unsigned short valAdc1[adcSamplesNumber],valAdc0[adcSamplesNumber],temp[adcSamplesNumber],minUnsmoothed1,minUnsmoothed0,maxUnsmoothed0,maxUnsmoothed1;
 static unsigned short minValue0,maxValue0,minValue1,maxValue1;
-static unsigned short minValuetimestamp[maxSweepFCount],maxValuetimestamp[maxSweepFCount],count,firstdata;//LET 4100 be the max bumber of frequencies todo change these to single variable later to save space
+static unsigned short count;//LET 5000 be the max bumber of frequencies todo change these to single variable later to savce space?
 static float pk_pk_phaseDiff[maxSweepFCount],temp1[maxSweepFCount],ohm,gain,impedance[maxSweepFCount],noRolloffFreq;
-//static float pk_pk1[maxSweepFCount];//save space TODO:
+//static float pk_pk1[maxSweepFCount]//save space
 unsigned long x,x1;
 float ms,y,periodus,periodsToScan;
 unsigned char i2cBuf[TR_BUFF_SIZE];
@@ -119,8 +70,7 @@ unsigned char smoothingInterval; //goes into smoothenAndEvaluate function
 long spiRet;
 static tBoolean TA1running;
 static tBoolean clipped;
-static int adcIndex1,adcIndex0; //TODO:CHECK MAX NUMBER THIS CAN REACH AND DECREASE DATA TYPE TO SAVE MEMORY?
-
+static int adcIndex1,adcIndex0; //TODO:CHECK MAX NUMBER THIS CAN REACH AND DECREASE DATA TYPE TO SAVE MEMORY.
 
 //****************************************************************************
 //                      LOCAL FUNCTION PROTOTYPES
@@ -148,11 +98,8 @@ void findInitialGain(void);
 void smoothenAndEvaluate(void);
 void finalSmoothingMedian(void);
 void clearAdc(void);
-static long WlanConnect();
-static void InitializeAppVariables();
-void doSingleSweep(void);
-void setupSweep(void);
-int cellServer(unsigned short);
+void enableADCints(void);
+void disableADCints(void);
 
 #if defined(ccs)
 extern void (* const g_pfnVectors[])(void);
@@ -163,159 +110,6 @@ extern uVectorEntry __vector_table;
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- End
 //*****************************************************************************
-
-
-//*****************************************************************************
-//
-//! This function initializes the application variables
-//!
-//! \param[in]    None
-//!
-//! \return None
-//!
-//*****************************************************************************
-static void InitializeAppVariables()
-{
-    g_ulStatus = 0;
-    g_ulGatewayIP = 0;
-    memset(g_ucConnectionSSID,0,sizeof(g_ucConnectionSSID));
-    memset(g_ucConnectionBSSID,0,sizeof(g_ucConnectionBSSID));
-    g_ulDestinationIp = IP_ADDR;
-    g_uiPortNum = PORT_NUM;
-    g_ulPacketCount = TCP_PACKET_COUNT;
-}
-
-
-//****************************************************************************
-//
-//! Confgiures the mode in which the device will work
-//!
-//! \param iMode is the current mode of the device
-//!
-//! This function
-//!    1. prompt user for desired configuration and accordingly configure the
-//!          networking mode(STA or AP).
-//!       2. also give the user the option to configure the ssid name in case of
-//!       AP mode.
-//!
-//! \return sl_start return value(int).
-//
-//****************************************************************************
-
-static int ConfigureMode(int iMode) //TODO: add password
-{
-    char    pcSsidName[33]="cctestAP";
-    long   lRetVal = -1;
-
-    lRetVal = sl_WlanSetMode(ROLE_AP);
-    ASSERT_ON_ERROR(lRetVal);
-
-    lRetVal = sl_WlanSet(SL_WLAN_CFG_AP_ID, WLAN_AP_OPT_SSID, strlen(pcSsidName),
-                            (unsigned char*)pcSsidName);
-    ASSERT_ON_ERROR(lRetVal);
-
-    //UART_PRINT("Device is configured in AP mode\n\r");
-
-    /* Restart Network processor */
-    lRetVal = sl_Stop(SL_STOP_TIMEOUT);
-
-    // reset status bits
-    CLR_STATUS_BIT_ALL(g_ulStatus);
-
-    return sl_Start(NULL,NULL,NULL);
-}
-
-//*****************************************************************************
-//
-//! \brief Handler for parsing JSON data
-//!
-//! \param[in]  ptr - Pointer to http response body data
-//!
-//! \return 0 on success else error code on failure
-//!
-//*****************************************************************************
-int ParseJSONData(char *ptr)
-{
-    long lRetVal = 0;
-    int noOfToken;
-    jsmn_parser parser;
-    jsmntok_t   *tokenList;
-    char keyString[30],dataString[30];//the strings are pretty small
-    unsigned int toklength;
-    jsmntok_t key,data;
-
-
-    /* Initialize JSON PArser */
-    jsmn_init(&parser);
-
-    /* Get number of JSON token in stream as we we dont know how many tokens need to pass */
-    noOfToken = jsmn_parse(&parser, (const char *)ptr, strlen((const char *)ptr), NULL, 10);
-    if(noOfToken <= 0)
-    {
-        UART_PRINT("Failed to initialize JSON parser\n\r");
-        return -1;
-
-    }
-
-    /* Allocate memory to store token */
-    tokenList = (jsmntok_t *) malloc(noOfToken*sizeof(jsmntok_t));
-    if(tokenList == NULL)
-    {
-        UART_PRINT("Failed to allocate memory\n\r");
-        return -1;
-    }
-
-    /* Initialize JSON Parser again */
-    jsmn_init(&parser);
-    noOfToken = jsmn_parse(&parser, (const char *)ptr, strlen((const char *)ptr), tokenList, noOfToken);
-    if(noOfToken < 0)
-    {
-        UART_PRINT("Failed to parse JSON tokens\n\r");
-        lRetVal = noOfToken;
-    }
-    else
-    {
-        UART_PRINT("Successfully parsed %ld JSON tokens\n\r", noOfToken);
-
-
-        int tok;
-        for (tok=1;tok<noOfToken;tok+=2){//every 2 tokens is a key token. Token 0 is the outer object.
-            key = tokenList[tok];
-            toklength = key.end - key.start;
-            memcpy(keyString, &ptr[key.start], toklength);
-            keyString[toklength] = '\0';
-
-
-            data = tokenList[tok+1];
-            toklength = data.end - data.start;
-            memcpy(dataString, &ptr[data.start], toklength);
-            dataString[toklength] = '\0';
-
-            if(!strcmp(keyString,"waveform")){
-                mode=atoi(dataString);
-            }
-            if(!strcmp(keyString,"startFreq")){
-                startFreq=atoi(dataString);
-            }
-            if(!strcmp(keyString,"endFreq")){
-                endFreq=atoi(dataString);
-            }
-            if(!strcmp(keyString,"stepFreq")){
-                stepFreq=atoi(dataString);
-            }
-            if(!strcmp(keyString,"interval")){
-                interval=atoi(dataString);
-            }
-        }
-        freqCount=(endFreq - startFreq) / stepFreq;
-
-    }
-
-
-    free(tokenList);
-
-    return lRetVal;
-}
 
 
 void changeGain(unsigned short d){//d=AD5272 digital wiper value
@@ -443,16 +237,17 @@ void findInitialGain(){
         adcIndex1=0;
         adcIndex0=0;
         TA1running=true;
-        if(freq<800){//found this to be ok
+        if(freq<800){//todo: tweak this if for higher freqs maybe
             periodsToScan=1.2;
             TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
         }
         else{
-            periodsToScan=6;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
+            periodsToScan=10;
+            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   TODO:REDUCE later 10X??
         }
         TimerEnable(TIMERA1_BASE,TIMER_A);
         clearAdc();
+        enableADCints();
         ADCEnable(ADC_BASE);    //START TO MEASURE
         while(TA1running==true);
 
@@ -481,7 +276,7 @@ void smoothenAndEvaluate(){
 
     //smoothingInterval increases with log. needs to BE ODD.we are taking the MEDIAN.
     //smoothingInterval=3;
-    smoothingInterval=G*log(2*4000/freq);//todo:NOTE changed endFreq here to 4000 since it works, permanently
+    smoothingInterval=G*log(2*endFreq/freq);//todo:change endFreq here to 4000 since it works, permanently
     if(smoothingInterval<3) smoothingInterval=3;//limit to above 3
     if((smoothingInterval%2)==0) smoothingInterval++;//needs to be odd
 
@@ -738,7 +533,7 @@ void configTA2(){
     TimerMatchSet(TIMERA2_BASE, TIMER_B,0x0001);
     TimerPrescaleMatchSet(TIMERA2_BASE, TIMER_B,0x00);  //switch to low in 25ns
     //TimerControlStall(TIMERA2_BASE, TIMER_BOTH,true);
-    //TimerEnable(TIMERA2_BASE,TIMER_BOTH);NOT YET.INTERFERES WITH WIFI!
+    TimerEnable(TIMERA2_BASE,TIMER_BOTH);
 }
 
 void digResSetup(void){
@@ -768,16 +563,16 @@ void adcSetup(){
     ADCTimerConfig(ADC_BASE,0x1ffff);  //or 20000?
     ADCTimerEnable(ADC_BASE);
     ADCIntClear(ADC_BASE, ADC_CH_3,0xf);
-    ADCIntEnable(ADC_BASE, ADC_CH_3,ADC_FIFO_FULL);
+    //ADCIntEnable(ADC_BASE, ADC_CH_3,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_3,adint3);
     ADCIntClear(ADC_BASE, ADC_CH_0,0xf);
-    ADCIntEnable(ADC_BASE, ADC_CH_0,ADC_FIFO_FULL);
+    //ADCIntEnable(ADC_BASE, ADC_CH_0,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_0,adint0);
     ADCIntClear(ADC_BASE, ADC_CH_1,0xf);
-    ADCIntEnable(ADC_BASE, ADC_CH_1,ADC_FIFO_FULL);
+    //ADCIntEnable(ADC_BASE, ADC_CH_1,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_1,adint1);
     ADCIntClear(ADC_BASE, ADC_CH_2,0xf);
-    ADCIntEnable(ADC_BASE, ADC_CH_2,ADC_FIFO_FULL);
+    //ADCIntEnable(ADC_BASE, ADC_CH_2,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_2,adint2);
     ADCChannelEnable(ADC_BASE, ADC_CH_3);
     ADCChannelEnable(ADC_BASE, ADC_CH_1);
@@ -794,7 +589,18 @@ void clearAdc(){
     while(ADCFIFOLvlGet(ADC_BASE, ADC_CH_2)) {
         ADCFIFORead(ADC_BASE, ADC_CH_2);}
 }
-
+void enableADCints(){
+    ADCIntEnable(ADC_BASE, ADC_CH_0,ADC_FIFO_FULL);
+    ADCIntEnable(ADC_BASE, ADC_CH_1,ADC_FIFO_FULL);
+    ADCIntEnable(ADC_BASE, ADC_CH_2,ADC_FIFO_FULL);
+    ADCIntEnable(ADC_BASE, ADC_CH_3,ADC_FIFO_FULL);
+}
+void disableADCints(){
+    ADCIntDisable(ADC_BASE, ADC_CH_0,ADC_FIFO_FULL);
+    ADCIntDisable(ADC_BASE, ADC_CH_1,ADC_FIFO_FULL);
+    ADCIntDisable(ADC_BASE, ADC_CH_2,ADC_FIFO_FULL);
+    ADCIntDisable(ADC_BASE, ADC_CH_3,ADC_FIFO_FULL);
+}
 static void adint1()
 {   //unsigned long Status = ADCIntStatus(ADC_BASE, ADC_CH_1);
     ADCIntClear(ADC_BASE, ADC_CH_1,0x1f);
@@ -854,6 +660,7 @@ static void countdownTimerInt()
         unsigned int x5=TimerValueGet(TIMERA1_BASE, TIMER_A);
         TimerIntClear(TIMERA1_BASE,TIMER_TIMA_TIMEOUT);
         ADCDisable(ADC_BASE);    //STop in case it's measuring
+        disableADCints();
         TA1running=false;
     }
 }
@@ -895,9 +702,106 @@ BoardInit(void)
     PRCMCC3200MCUInit();
 }
 
-void setupSweep(){
-        TimerEnable(TIMERA2_BASE,TIMER_BOTH);//ENABLE THE AD 9833 CLOCK HERE.INTERFERES WITH WIFI!
-        MAP_UtilsDelay(MILLISECONDS_TO_TICKS(400));//TODO:DALAY A BIT for the ad9833 to settle?
+//*****************************************************************************
+//
+//! Main function for spi demo application
+//!
+//! \param none
+//!
+//! \return None.
+//
+//*****************************************************************************
+void main()
+{
+    int stepFreq=0;
+    //
+    // Initialize Board configurations
+    //
+    BoardInit();
+
+    //
+    // Muxing UART and SPI lines.
+    //
+    PinMuxConfig();
+
+    //
+    // Initialising the Terminal.
+    //
+    InitTerm();
+
+    //
+    // Clearing the Terminal.
+    //
+    ClearTerm();
+
+    //
+    // Display the Banner
+    //
+    UART_PRINT("\n\n\n\r");
+    UART_PRINT("\t\t   ********************************************\n\r");
+    UART_PRINT("\t\t        CC3200 SPI EIS  \n\r");
+    UART_PRINT("\t\t   ********************************************\n\r");
+    UART_PRINT("\n\n\n\r");
+
+    //
+    // Reset the peripheral
+    //
+    MAP_PRCMPeripheralReset(PRCM_GSPI);
+
+
+    //
+    // I2C Init
+    //
+    I2C_IF_Open(I2C_MASTER_MODE_FST);
+
+    //Configure gpio31 for clipper interrupt:
+    GPIOIntTypeSet(GPIOA3_BASE, 0x80,GPIO_RISING_EDGE);
+    GPIOIntRegister(GPIOA3_BASE,int31);
+    GPIOIntClear(GPIOA3_BASE, 0x80);
+    GPIOIntEnable(GPIOA3_BASE, 0x80);
+
+
+    //OUTPUT 20Mhz clock from p64:
+    configTA2();
+
+    adcSetup();
+    configTA1();  //countdown timer
+    digResSetup();
+
+
+    //
+    // Reset SPI
+    //
+    MAP_SPIReset(GSPI_BASE);
+
+    //
+    // Configure SPI interface
+    //
+    MAP_SPIConfigSetExpClk(GSPI_BASE,MAP_PRCMPeripheralClockGet(PRCM_GSPI),
+                     SPI_IF_BIT_RATE,SPI_MODE_MASTER,SPI_SUB_MODE_2,
+                     (SPI_SW_CTRL_CS |
+                     SPI_4PIN_MODE |
+                     SPI_TURBO_OFF |
+                     SPI_CS_ACTIVELOW |
+                     SPI_WL_16));
+
+    //
+    // Enable SPI for communication
+    //
+    MAP_SPIEnable(GSPI_BASE);
+
+    UART_PRINT("Enabled SPI Interface in Master Mode\n\r");
+    //
+    // Send the strings to slave. Chip Select(CS) needs to be
+    // asserted at start of transfer and deasserted at the end.
+    //
+
+    mode=1;//selectMode();
+    while(true){
+        count=0;//counter for each fequency change
+        startFreq=10;//getStartFreq();
+        endFreq=4000;//getEndFreq();
+        stepFreq=10;//getStepFreq();
         freq=endFreq;//START FROM FINAL FREQUENCY TO BE ABLE TO ADJUST GAIN FASTER
         periodus=(1e6)/freq;
         switch(mode){
@@ -953,563 +857,119 @@ void setupSweep(){
             PinTypeADC(PIN_59, PIN_MODE_255);
         }
 
-        MAP_UtilsDelay(MILLISECONDS_TO_TICKS(400));//TODO:DALAY A BIT FOR THE FIRST WAVE TO SETTLE.
+        MAP_UtilsDelay(MILLISECONDS_TO_TICKS(200));//DALAY A BIT FOR THE FIRST WAVE TO SETTLE.
         findInitialGain();//find the starting gain in the max frequency.
-}
+        while(freq>=startFreq){   //CLK FREQ is 20MHZ
+            periodus=(1e6)/freq;
+            startatFreq(freq);
+            //
+            // Report to the user
+            //
+            UART_PRINT("Sweeping @ freq :%dHz\n\r",freq);
 
-void doSingleSweep(){
-    TimerEnable(TIMERA2_BASE,TIMER_BOTH);//ENABLE THE AD 9833 CLOCK HERE.INTERFERES WITH WIFI!
-    MAP_UtilsDelay(MILLISECONDS_TO_TICKS(400));//TODO:DALAY A BIT for the ad9833 to settle?
-    count=0;//counter for each frequency change
-    freq=endFreq;//START FROM FINAL FREQUENCY TO BE ABLE TO ADJUST GAIN FASTER
-    while(freq>=startFreq){   //START FROM FINAL FREQ
-        periodus=(1e6)/freq;
-        startatFreq(freq);
-        //
-        // Report to the user
-        //
-        UART_PRINT("Sweeping @ freq :%dHz\n\r",freq);
-
-
-        minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
-        minUnsmoothed0=4095;
-        clipped=false;
-        adcIndex1=0;
-        adcIndex0=0;
-        TA1running=true;
-        if(freq<800){//tweak this if for higher freqs maybe
-            periodsToScan=1.2;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
-        }
-        else{
-            periodsToScan=6;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   REDUCED
-        }
-        TimerEnable(TIMERA1_BASE,TIMER_A);
-        clearAdc();
-        ADCEnable(ADC_BASE);    //START TO MEASURE
-        while(TA1running==true);
-
-        if((minUnsmoothed1<800)||(clipped==true)){
-            D=D*2;
-            if(D>1023){
-                D=1023;
+            minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
+            minUnsmoothed0=4095;
+            clipped=false;
+            adcIndex1=0;
+            adcIndex0=0;
+            TA1running=true;
+            if(freq<800){//todo: tweak this if for higher freqs maybe
+                periodsToScan=1.2;
+                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
             }
-            changeGain(D);
-        }
+            else{
+                periodsToScan=7;
+                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   TODO:REDUCE later 10X??
+            }
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            clearAdc();
+            enableADCints();
+            ADCEnable(ADC_BASE);    //START TO MEASURE
+            while(TA1running==true);
+
+            if((minUnsmoothed1<800)||(clipped==true)){
+                D=D*2;
+                if(D>1023){
+                    D=1023;
+                }
+                changeGain(D);
+            }
+/*            if(minUnsmoothed1>1710){//for inductive loads. NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
+                D=D/2;
+                if(D<>3){
+                    D=3;
+                }
+                changeGain(D);
+            }*/
+            mincounter1=0;//todo
+            mincounter0=0;
 
 
-        mincounter1=0;//todo
-        mincounter0=0;
+            minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
+            minUnsmoothed0=4095;
+            maxUnsmoothed1=0;//start minimized,finish with acquired max value after each measurement.
+            maxUnsmoothed0=0;
+            minsmoothedTimestamp1=0;//timestamps for edge time detection
+            minsmoothedTimestamp0=0;
+            adcIndex1=0;
+            adcIndex0=0;
+            TA1running=true;
+            if(freq<800){//todo: tweak this if for higher freqs maybe
+                periodsToScan=1.2;
+                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
+            }
+            else{
+                periodsToScan=7;
+                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   TODO:REDUCE later 10X??
+            }
+            TimerEnable(TIMERA1_BASE,TIMER_A);
+            clearAdc();// clear data
+            enableADCints();
+            ADCEnable(ADC_BASE);    //START TO MEASURE
+            while(TA1running==true);
+            //removeFirstValues();//TODO:use??
 
+            //32bit timer init for measuring...
+            Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
+            TimerControlStall(TIMERA0_BASE, TIMER_A,true);  //enable timer stall on debug breakpoint
+            TimerLoadSet(TIMERA0_BASE,TIMER_A,0xffffffff);
+            TimerEnable(TIMERA0_BASE,TIMER_A);
+            x=TimerValueGet(TIMERA0_BASE, TIMER_A); //time reference.warning this method of time measurement can be max ~55s
 
-        minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
-        minUnsmoothed0=4095;
-        maxUnsmoothed1=0;//start minimized,finish with acquired max value after each measurement.
-        maxUnsmoothed0=0;
-        minsmoothedTimestamp1=0;//timestamps for edge time detection
-        minsmoothedTimestamp0=0;
-        adcIndex1=0;
-        adcIndex0=0;
-        TA1running=true;
-        if(freq<800){//found this to be ok
-            periodsToScan=1.2;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
-        }
-        else{
-            periodsToScan=6;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   REDUCED
-        }
-        TimerEnable(TIMERA1_BASE,TIMER_A);
-        clearAdc();// clear data
-        ADCEnable(ADC_BASE);    //START TO MEASURE
-        while(TA1running==true);
-        TimerDisable(TIMERA2_BASE,TIMER_BOTH);//TODO:DISABLE THE AD 9833 CLOCK HERE,before smoothenAndEvaluate,which takes some time. IT INTERFERES WITH WIFI!
+                        smoothenAndEvaluate();
 
-        //32bit timer init for measuring...
-        Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
-        TimerControlStall(TIMERA0_BASE, TIMER_A,true);  //enable timer stall on debug breakpoint
-        TimerLoadSet(TIMERA0_BASE,TIMER_A,0xffffffff);
-        TimerEnable(TIMERA0_BASE,TIMER_A);
-        x=TimerValueGet(TIMERA0_BASE, TIMER_A); //time reference.warning this method of time measurement can be max ~55s
-
-                    smoothenAndEvaluate();
-
-        y=tdif(x);  //us
-        ms=y/1000;  //ms
-        TimerDisable(TIMERA0_BASE,TIMER_A);
+            y=tdif(x);  //us
+            ms=y/1000;  //ms
+            TimerDisable(TIMERA0_BASE,TIMER_A);
 
 
 /*            if(freq<endFreq){
-            waitForEnter();
-        }*/
-        if(count==0){
-            noRolloffFreq=(float)GBWP/gain/10;    //calculate this from gain used in the max used frequency. I assume zero rolloff happens in BW/10.
+                waitForEnter();
+            }*/
+            if(count==0){
+                noRolloffFreq=(float)GBWP/gain/10;    //calculate this from gain used in the max used frequency. I assume zero rolloff happens in BW/10.
+            }
+            count+=1;
+            freq-=stepFreq; //next frequency
         }
-        count+=1;
-        freq-=stepFreq; //next frequency
-    }
-    count-=1;//store the frequency count
-    freq+=stepFreq; //store the final frequency(it's the smallest scanned)
-    finalSmoothingMedian();//SMOOTHEN PHASE DIFF
-    finalSmoothingAverage();//FURTHER SMOOTHEN USING ROLLING AVG FILTER
-
-    UART_PRINT("0 Rolloff max frequency for this sample: %.1f\n\r",noRolloffFreq);
-    UART_PRINT("Sweep finished\n\r");
-}
-
-
-
-
-//****************************************************************************
-//
-//! \brief Opening a TCP server side socket and receiving data
-//!
-//! This function opens a TCP socket in Listen mode and waits for an incoming
-//!    TCP connection.
-//! Then waits for the instructions and does sweeps until a stop command or disconnection.
-//!
-//!
-//! \param[in] port number on which the server will be listening on
-//!
-//! \return     0 on success, -1 on error.
-//!
-//! \note   This function will wait for an incoming connection till
-//!                     one is established
-//
-//****************************************************************************
-int cellServer(unsigned short usPort)
-{
-    SlSockAddrIn_t  sAddr;
-    SlSockAddrIn_t  sLocalAddr;
-    int             transmitCount=0;
-    int             iAddrSize;
-    int             iSockID;
-    int             iStatus;
-    int             iNewSockID;
-    long            lLoopCount = 0;
-    long            lNonBlocking = 1;
-    long            lBlocking = 0;
-    int             iTestBufLen;
-    long lRetVal = 0;
-    int i3,i4,i5;//clock interval counter
-
-    memset(g_cBsdBuf,0,sizeof(g_cBsdBuf));//clear whole buffer.
-    //filling the TCP server socket address
-    sLocalAddr.sin_family = SL_AF_INET;
-    sLocalAddr.sin_port = sl_Htons((unsigned short)usPort);
-    sLocalAddr.sin_addr.s_addr = 0;
-
-    // creating a TCP socket
-    iSockID = sl_Socket(SL_AF_INET,SL_SOCK_STREAM, 0);
-    if( iSockID < 0 )
-    {
-        // error
-        ASSERT_ON_ERROR(SOCKET_CREATE_ERROR);
-    }
-
-    iAddrSize = sizeof(SlSockAddrIn_t);
-    //OPTION, needs to be blocking
-    iStatus = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, SL_SO_NONBLOCKING,
-                            &lBlocking, sizeof(lBlocking));
-    if( iStatus < 0 )
-    {
-        // error
-        sl_Close(iSockID);
-        ASSERT_ON_ERROR(SOCKET_OPT_ERROR);
-    }
-    // binding the TCP socket to the TCP server address
-    iStatus = sl_Bind(iSockID, (SlSockAddr_t *)&sLocalAddr, iAddrSize);
-    if( iStatus < 0 )
-    {
-        // error
-        sl_Close(iSockID);
-        ASSERT_ON_ERROR(BIND_ERROR);
-    }
-
-    // putting the socket for listening to the incoming TCP connection
-    iStatus = sl_Listen(iSockID, 0);
-    if( iStatus < 0 )
-    {
-        sl_Close(iSockID);
-        ASSERT_ON_ERROR(LISTEN_ERROR);
-    }
-
-    if( iStatus < 0 )
-    {
-        sl_Close(iSockID);
-        ASSERT_ON_ERROR(SOCKET_OPT_ERROR);
-    }
-
-    //Accepts a connection form a TCP client, if there is any
-    iNewSockID = sl_Accept(iSockID, ( struct SlSockAddr_t *)&sAddr,
-                            (SlSocklen_t*)&iAddrSize);
-
-    if( iNewSockID < 0 )
-    {
-        // error
-        sl_Close(iNewSockID);
-        sl_Close(iSockID);
-        ASSERT_ON_ERROR(ACCEPT_ERROR);
-    }
-    //first time we need to be blocking ,expecting first message.
-    iStatus = sl_SetSockOpt(iNewSockID, SL_SOL_SOCKET, SL_SO_NONBLOCKING,
-                            &lBlocking, sizeof(lBlocking));
-    if( iStatus < 0 )
-    {
-        // error
-        sl_Close(iNewSockID);
-        sl_Close(iSockID);
-        ASSERT_ON_ERROR(SOCKET_OPT_ERROR);
-    }
-    //do{
-        //_SlNonOsMainLoopTask(); //needed.
-        iStatus = sl_Recv(iNewSockID, g_cBsdBuf, BUF_SIZE, 0);//}
-    //while(iStatus<0);//TODO sometimes istatus gives 0 without communication??or when disconnected because for some reason the callbacks never work aside from ip leased..
-    if( iStatus <= 0 )
-    {
-      // error
-
-        Report("RECV_ERROR,closed sockets\n\r");
-        // close the connected socket
-        iStatus = sl_Close(iNewSockID);
-        ASSERT_ON_ERROR(iStatus);
-        // close the listening socket
-        iStatus = sl_Close(iSockID);
-        ASSERT_ON_ERROR(iStatus);
-        return -1;
-    }
-
-    Report("Received %d BYTES successfully\n\r",iStatus);
-    /* Parse JSON data */
-    lRetVal = ParseJSONData(g_cBsdBuf);
-    //MAP_UtilsDelay(80000000);//TODO:delay because the phone needs to switch to activity for receiving??
-    //leave 30s for the end..
-    i5=(interval-30)/20;//DIV
-    i4=(interval-30)-i5*20;//MOD.REMAINDER
-
-    setupSweep();//set the sweep's parameters in here.
-    TA1running=false;
-    while(1){
-            _SlNonOsMainLoopTask(); //needed?
-
-            //(the sweep takes max 20s.the sending of data takes max. 10s.)
-
-            //here we are doing the measurements.measurements take max~20s
-            doSingleSweep();
-
-
-            if(transmitCount>0){//not blocking in sl_recv after first read.asynchronously expecting any "stop" message
-                iStatus = sl_Recv(iNewSockID, g_cBsdBuf, BUF_SIZE, 0);//sometimes istatus gives 0 without communication??or when disconnected because for some reason the callbacks never work aside from ip leased..
-                if(iStatus==0){//error,probably disconnected
-                    Report("RECV_ERROR,closed sockets\n\r");
-                    break;
-                }
-                else if(iStatus>0){
-                    if(!strcmp(g_cBsdBuf,"stop\n")){
-                        Report("STOP instruction received\n\r");
-                        //stop measuring
-                        break;
-                    }
-                }
-
-                Report("Received %d BYTES successfully\n\r",iStatus);
-                // setting socket option to make the socket as blocking.we need a blocking send in order to acknowledge when there is disconnection or error and restart program.
-                iStatus = sl_SetSockOpt(iNewSockID, SL_SOL_SOCKET, SL_SO_NONBLOCKING,
-                                        &lBlocking, sizeof(lBlocking));
-                if( iStatus < 0 ){
-                    // error
-                    break;
-                }
-            }
-
-            firstdata=count;//the first,smallest frequency is at the final position
-            // sending multiple packets to the TCP server
-            while (freq <= endFreq)//send all these packets
-            {
-                memset(g_cBsdBuf,0,sizeof(g_cBsdBuf));//clear whole buffer.
-                sprintf(g_cBsdBuf,"{freq:%d,mag:%.2f,phase:%.2f}\n",freq,impedance[count],pk_pk_phaseDiff[count]);
-                // sending packet
-                iStatus = sl_Send(iNewSockID,g_cBsdBuf,BUF_SIZE,0);
-                //MAP_UtilsDelay(500000);//TODO remove later.phone picks up the packets fast enough.
-                _SlNonOsMainLoopTask(); //needed?
-                if( iStatus <= 0 ){// error
-                    iStatus = sl_Close(iNewSockID);
-                    ASSERT_ON_ERROR(iStatus);
-                    // close the listening socket
-                    iStatus = sl_Close(iSockID);
-                    ASSERT_ON_ERROR(iStatus);
-                    Report("send_ERROR\n\r");
-                    return -1;
-                }
-                Report("Sent %s\n\r",g_cBsdBuf);
-                count--;
-                freq=freq+stepFreq;
-            }
-            Report("Sent %u packets successfully\n\r",lLoopCount);
-            //break;
-            // setting socket option to make the socket as non blocking in order to receive any "stop" command.
-            iStatus = sl_SetSockOpt(iNewSockID, SL_SOL_SOCKET, SL_SO_NONBLOCKING,
-                                    &lNonBlocking, sizeof(lNonBlocking));
-            if( iNewSockID < 0 ){
-                // error
-                break;
-            }
-
-            while(TA1running==true);
-
-            //go for (i5)*20s...
-            for (i3=1;i3<=i5;i3++){
-                TA1running=true;
-                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0*20));
-                TimerEnable(TIMERA1_BASE,TIMER_A);
-                while(TA1running==true);
-
-                //check every 20s for stop/disconnect:
-                if(transmitCount>=0){//not blocking in sl_recv after first read.asynchronously expecting "stop" message
-                    iStatus = sl_Recv(iNewSockID, g_cBsdBuf, BUF_SIZE, 0);//sometimes istatus gives 0 without communication??or when disconnected because for some reason the callbacks never work aside from ip leased..
-                    if(iStatus==0){//error,probably disconnected
-                        Report("RECV_ERROR,closed sockets\n\r");
-                        iStatus = sl_Close(iNewSockID);
-                        ASSERT_ON_ERROR(iStatus);
-                        // close the listening socket
-                        iStatus = sl_Close(iSockID);
-                        ASSERT_ON_ERROR(iStatus);
-                        return -1;
-                    }
-                    else if(iStatus>0){
-                        if(!strcmp(g_cBsdBuf,"stop\n")){
-                            Report("STOP instruction received\n\r");
-                            //stop measuring
-                            iStatus = sl_Close(iNewSockID);
-                            ASSERT_ON_ERROR(iStatus);
-                            // close the listening socket
-                            iStatus = sl_Close(iSockID);
-                            ASSERT_ON_ERROR(iStatus);
-                            return -1;
-                        }
-                    }
-
-                    Report("Received %d BYTES successfully\n\r",iStatus);
-                }
-
-            }
-            //delay for remainder:
-            if(i4>0){
-                TA1running=true;
-                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0*i4));
-                TimerEnable(TIMERA1_BASE,TIMER_A);
-                while(TA1running==true);
-            }
-            while(TA1running==true);
-            //delay for the last 30s:
-            TA1running=true;
-            TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(1000.0*30));
-            TimerEnable(TIMERA1_BASE,TIMER_A);
-
-            memset(g_cBsdBuf,0,sizeof(g_cBsdBuf));//clear whole buffer.
-            transmitCount++;
-
-    }
-
-    // close the connected socket after receiving from connected TCP client?
-    iStatus = sl_Close(iNewSockID);
-    ASSERT_ON_ERROR(iStatus);
-    // close the listening socket
-    iStatus = sl_Close(iSockID);
-    ASSERT_ON_ERROR(iStatus);
-    return -1;
-
-}
-
-
-
-
-
-//*****************************************************************************
-//
-//! Main function for spi demo application
-//!
-//! \param none
-//!
-//! \return None.
-//
-//*****************************************************************************
-void main()
-{
-    long lRetVal = -1;
-    //
-    // Initialize Board configurations
-    //
-    BoardInit();
-
-    //
-    // Muxing UART and SPI lines.
-    //
-    PinMuxConfig();
-
-    //
-    // Initialising the Terminal.
-    //
-    InitTerm();
-
-    //
-    // Clearing the Terminal.
-    //
-    ClearTerm();
-
-    //
-    // Display the Banner
-    //
-    UART_PRINT("\n\n\n\r");
-    UART_PRINT("\t\t   ********************************************\n\r");
-    UART_PRINT("\t\t        CC3200 SPI EIS  \n\r");
-    UART_PRINT("\t\t   ********************************************\n\r");
-    UART_PRINT("\n\n\n\r");
-
-    InitializeAppVariables();
-
-    //
-    // Following function configure the device to default state by cleaning
-    // the persistent settings stored in NVMEM (viz. connection profiles &
-    // policies, power policy etc)
-    //
-    // Applications may choose to skip this step if the developer is sure
-    // that the device is in its default state at start of applicaton
-    //
-    // Note that all profiles and persistent settings that were done on the
-    // device will be lost
-    //
-    lRetVal = ConfigureSimpleLinkToDefaultState();
-
-    if(lRetVal < 0)
-    {
-      if (DEVICE_NOT_IN_STATION_MODE == lRetVal)
-         UART_PRINT("Failed to configure the device in its default state \n\r");
-
-      LOOP_FOREVER();
-    }
-
-    UART_PRINT("Device is configured in default state \n\r");
-
-    //
-    // Asumption is that the device is configured in station mode already
-    // and it is in its default state
-    //
-    lRetVal = sl_Start(0, 0, 0);
-    if (lRetVal < 0)
-    {
-        UART_PRINT("Failed to start the device \n\r");
-        LOOP_FOREVER();
-    }
-
-    UART_PRINT("Device started as STATION \n\r");
-
-
-
-    //
-    // Configure the networking mode and ssid name(for AP mode)
-    //
-    if(lRetVal != ROLE_AP)
-    {
-        if(ConfigureMode(lRetVal) != ROLE_AP)
-        {
-            UART_PRINT("Unable to set AP mode, exiting Application...\n\r");
-            sl_Stop(SL_STOP_TIMEOUT);
-            LOOP_FOREVER();
+        finalSmoothingMedian();//SMOOTHEN PHASE DIFF
+        finalSmoothingAverage();//FURTHER SMOOTHEN USING ROLLING AVG FILTER
+        //tests...
+        if(mode==1){
+            mode=2;
         }
-    }
-
-
-    while(!IS_IP_ACQUIRED(g_ulStatus))
-    {
-#ifndef SL_PLATFORM_MULTI_THREADED
-      _SlNonOsMainLoopTask();
-#endif
-    }
-
-
-    //
-    // Reset the spi peripheral
-    //
-    MAP_PRCMPeripheralReset(PRCM_GSPI);
-
-
-    //
-    // I2C Init
-    //
-    I2C_IF_Open(I2C_MASTER_MODE_FST);
-
-    //Configure gpio31 for clipper interrupt:
-    GPIOIntTypeSet(GPIOA3_BASE, 0x80,GPIO_RISING_EDGE);
-    GPIOIntRegister(GPIOA3_BASE,int31);
-    GPIOIntClear(GPIOA3_BASE, 0x80);
-    GPIOIntEnable(GPIOA3_BASE, 0x80);
-
-
-    //config to OUTPUT 20Mhz clock from p64:
-    configTA2();
-
-    adcSetup();
-    configTA1();  //countdown timer
-    digResSetup();
-
-
-    //
-    // Reset SPI
-    //
-    MAP_SPIReset(GSPI_BASE);
-
-    //
-    // Configure SPI interface
-    //
-    MAP_SPIConfigSetExpClk(GSPI_BASE,MAP_PRCMPeripheralClockGet(PRCM_GSPI),
-                     SPI_IF_BIT_RATE,SPI_MODE_MASTER,SPI_SUB_MODE_2,
-                     (SPI_SW_CTRL_CS |
-                     SPI_4PIN_MODE |
-                     SPI_TURBO_OFF |
-                     SPI_CS_ACTIVELOW |
-                     SPI_WL_16));
-
-    //
-    // Enable SPI for communication
-    //
-    MAP_SPIEnable(GSPI_BASE);
-
-    UART_PRINT("Enabled SPI Interface in Master Mode\n\r");
-    //
-    // Send the strings to slave. Chip Select(CS) needs to be
-    // asserted at start of transfer and deasserted at the end.
-    //
-
-
-    while(1){
-        _SlNonOsMainLoopTask();
-        lRetVal = cellServer(PORT_NUM);
-        if(lRetVal < 0)
-        {
-            UART_PRINT("TCP Server failed\n\r");
+        else if (mode==2){
+            mode=3;
         }
-        sl_Stop(SL_STOP_TIMEOUT);
-        MAP_UtilsDelay(140000000);//TODO:delay before re-establishing connection?
-        lRetVal = sl_Start(0, 0, 0);
-        if (lRetVal < 0)
-        {
-            UART_PRINT("Failed to start the device \n\r");
-            break;
+        else{
+            mode=1;
         }
-    }
 
-    UART_PRINT("Exiting Application ...\n\r");
 
-    //
-    // power of the Network processor
-    //
-    lRetVal = sl_Stop(SL_STOP_TIMEOUT);
 
-    while (1)
-    {
-        _SlNonOsMainLoopTask();
+
+        UART_PRINT("0 Rolloff max frequency for this sample: %.1f\n\r",noRolloffFreq);
+        UART_PRINT("Sweep finished\n\r");
     }
 
     while(1)
