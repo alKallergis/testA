@@ -1,7 +1,8 @@
 
 //changed the ADC INTS TO ONLY be enabled when measuring. used to give erratic ints throughout the program.
 //added smoothing for the impedance.
-
+//changed mincounter0,mincounter1,minsmoothedTimestamp1,minsmoothedTimestamp0 data type to int
+//changed stampDiff data type to float
 // Standard includes
 #include <string.h>
 #include <stdlib.h>
@@ -57,7 +58,8 @@ unsigned short freq0Lsbs;
 unsigned short reset1=0b0000000100000000;
 unsigned short reset0=0b0000000000000000;
 int startFreq, freq,endFreq,mode;
-int stampDiff,mincounter0,mincounter1;
+int mincounter0,mincounter1,minsmoothedTimestamp1,minsmoothedTimestamp0;
+float stampDiff;
 static unsigned short D,Dprev;
 static unsigned short valAdc1[adcSamplesNumber],valAdc0[adcSamplesNumber],temp[adcSamplesNumber],minUnsmoothed1,minUnsmoothed0,maxUnsmoothed0,maxUnsmoothed1;
 static unsigned short minValue0,maxValue0,minValue1,maxValue1;
@@ -72,7 +74,6 @@ long spiRet;
 static tBoolean TA1running;
 static tBoolean clipped;
 static int adcIndex1,adcIndex0; //TODO:CHECK MAX NUMBER THIS CAN REACH AND DECREASE DATA TYPE TO SAVE MEMORY.
-unsigned int minsmoothedTimestamp1,minsmoothedTimestamp0;
 
 //****************************************************************************
 //                      LOCAL FUNCTION PROTOTYPES
@@ -275,6 +276,7 @@ void findInitialGain(){
 void smoothenAndEvaluate(){
     char i3,G=3;
     int i1,i2;
+    float i7,i8;
     unsigned  short smoothWindow[300],temp2;//!!let smoothingInterval<300
 
     //smoothingInterval increases with log. needs to BE ODD.we are taking the MEDIAN.
@@ -326,8 +328,8 @@ void smoothenAndEvaluate(){
         for(i1=1;i1<adcIndex0;i1++){
             if(temp[i1]<minValue0){
                 minValue0=temp[i1];
-                if(8.0*i1<periodus){       //use only the first sampled period of the wave for finding phase diff todo:change 8.0 to 8 and see what happens?
-                    minsmoothedTimestamp0=i1;//todo change this type to simple unsigned int
+                if(8.0*i1<periodus){       //use only the first sampled period of the wave for finding phase diff
+                    minsmoothedTimestamp0=i1;
                 }
 
                 mincounter0++;
@@ -379,7 +381,7 @@ void smoothenAndEvaluate(){
         if(temp[i1]<minValue1){
             minValue1=temp[i1];
             if(8.0*i1<periodus){       //use only the first sampled period of the wave for finding phase diff
-                minsmoothedTimestamp1=i1;//todo change this type to simple unsigned int
+                minsmoothedTimestamp1=i1;
             }
             mincounter1++;
         }
@@ -393,13 +395,14 @@ void smoothenAndEvaluate(){
 
 
 
-
     if(mode!=3){//no use detecting input channel edges for square waveform
-        if(abs(minsmoothedTimestamp1-minsmoothedTimestamp0)<abs(minsmoothedTimestamp1-minsmoothedTimestamp0+((float)adcIndex1/periodsToScan))){//from notes:go with the smallest abs value of phase difference.
-            stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0;
+        i7=abs(minsmoothedTimestamp1-minsmoothedTimestamp0);
+        i8=abs(minsmoothedTimestamp1-minsmoothedTimestamp0+((float)adcIndex1/periodsToScan));
+        if(i7<i8){//from notes:go with the smallest abs value of phase difference.
+            stampDiff=i7;
         }
         else{
-            stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0+((float)adcIndex1/periodsToScan);//(from notes)add 1 period in case the 1st edge didn't get picked at the dds source signal,causing it to show 1 period later.
+            stampDiff=i8;//(from notes)add 1 period in case the 1st edge didn't get picked at the dds source signal,causing it to show 1 period later.
         }
         pk_pk_phaseDiff[count]=360.0*freq*stampDiff*8/1e6;//adc timer cycle is 16us,sample for each channel every 8us
 
@@ -704,7 +707,7 @@ static void adint2()
 static void countdownTimerInt()
 {
     if (TimerIntStatus(TIMERA1_BASE,true)==0x1){   // timeout int has happened
-        unsigned int x5=TimerValueGet(TIMERA1_BASE, TIMER_A);
+        //unsigned int x5=TimerValueGet(TIMERA1_BASE, TIMER_A);
         TimerIntClear(TIMERA1_BASE,TIMER_TIMA_TIMEOUT);
         ADCDisable(ADC_BASE);    //STop in case it's measuring
         TA1running=false;
