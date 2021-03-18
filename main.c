@@ -57,7 +57,7 @@ unsigned short freq0Lsbs;
 unsigned short reset1=0b0000000100000000;
 unsigned short reset0=0b0000000000000000;
 int startFreq, freq,endFreq,mode;
-long long int stampDiff,minsmoothedTimestamp1,minsmoothedTimestamp0,mincounter0,mincounter1;
+int stampDiff,mincounter0,mincounter1;
 static unsigned short D,Dprev;
 static unsigned short valAdc1[adcSamplesNumber],valAdc0[adcSamplesNumber],temp[adcSamplesNumber],minUnsmoothed1,minUnsmoothed0,maxUnsmoothed0,maxUnsmoothed1;
 static unsigned short minValue0,maxValue0,minValue1,maxValue1;
@@ -72,6 +72,7 @@ long spiRet;
 static tBoolean TA1running;
 static tBoolean clipped;
 static int adcIndex1,adcIndex0; //TODO:CHECK MAX NUMBER THIS CAN REACH AND DECREASE DATA TYPE TO SAVE MEMORY.
+unsigned int minsmoothedTimestamp1,minsmoothedTimestamp0;
 
 //****************************************************************************
 //                      LOCAL FUNCTION PROTOTYPES
@@ -250,7 +251,6 @@ void findInitialGain(){
         }
         TimerEnable(TIMERA1_BASE,TIMER_A);
         clearAdc();
-        enableADCints();
         ADCEnable(ADC_BASE);    //START TO MEASURE
         while(TA1running==true);
 
@@ -610,16 +610,16 @@ void adcSetup(){
     ADCTimerConfig(ADC_BASE,0x1ffff);  //or 20000?
     ADCTimerEnable(ADC_BASE);
     ADCIntClear(ADC_BASE, ADC_CH_3,0xf);
-    //ADCIntEnable(ADC_BASE, ADC_CH_3,ADC_FIFO_FULL);
+    ADCIntEnable(ADC_BASE, ADC_CH_3,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_3,adint3);
     ADCIntClear(ADC_BASE, ADC_CH_0,0xf);
-    //ADCIntEnable(ADC_BASE, ADC_CH_0,ADC_FIFO_FULL);
+    ADCIntEnable(ADC_BASE, ADC_CH_0,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_0,adint0);
     ADCIntClear(ADC_BASE, ADC_CH_1,0xf);
-    //ADCIntEnable(ADC_BASE, ADC_CH_1,ADC_FIFO_FULL);
+    ADCIntEnable(ADC_BASE, ADC_CH_1,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_1,adint1);
     ADCIntClear(ADC_BASE, ADC_CH_2,0xf);
-    //ADCIntEnable(ADC_BASE, ADC_CH_2,ADC_FIFO_FULL);
+    ADCIntEnable(ADC_BASE, ADC_CH_2,ADC_FIFO_FULL);
     ADCIntRegister(ADC_BASE, ADC_CH_2,adint2);
     ADCChannelEnable(ADC_BASE, ADC_CH_3);
     ADCChannelEnable(ADC_BASE, ADC_CH_1);
@@ -707,7 +707,6 @@ static void countdownTimerInt()
         unsigned int x5=TimerValueGet(TIMERA1_BASE, TIMER_A);
         TimerIntClear(TIMERA1_BASE,TIMER_TIMA_TIMEOUT);
         ADCDisable(ADC_BASE);    //STop in case it's measuring
-        disableADCints();
         TA1running=false;
     }
 }
@@ -930,7 +929,6 @@ void main()
             }
             TimerEnable(TIMERA1_BASE,TIMER_A);
             clearAdc();
-            enableADCints();
             ADCEnable(ADC_BASE);    //START TO MEASURE
             while(TA1running==true);
 
@@ -971,7 +969,6 @@ void main()
             }
             TimerEnable(TIMERA1_BASE,TIMER_A);
             clearAdc();// clear data
-            enableADCints();
             ADCEnable(ADC_BASE);    //START TO MEASURE
             while(TA1running==true);
             //removeFirstValues();//TODO:use??
@@ -1003,7 +1000,7 @@ void main()
         finalSmoothingAverage();//FURTHER SMOOTHEN USING ROLLING AVG FILTER
         finalSmoothingImpedance();//SMOOTHEN imp USING THE ROLLING MEDIAN FILTER
         //tests...
-        if(mode==1){
+/*        if(mode==1){
             mode=2;
         }
         else if (mode==2){
@@ -1011,7 +1008,7 @@ void main()
         }
         else{
             mode=1;
-        }
+        }*/
 
 
 
