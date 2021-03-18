@@ -1,5 +1,6 @@
 
 //changed the ADC INTS TO ONLY be enabled when measuring. used to give erratic ints throughout the program.
+//added smoothing for the impedance.
 
 // Standard includes
 #include <string.h>
@@ -95,8 +96,10 @@ void configTA1(void);
 void startatFreq(float);
 void int31(void);
 void findInitialGain(void);
+void finalSmoothingImpedance(void);
 void smoothenAndEvaluate(void);
 void finalSmoothingMedian(void);
+void finalSmoothingAverage(void);
 void clearAdc(void);
 void enableADCints(void);
 void disableADCints(void);
@@ -392,11 +395,11 @@ void smoothenAndEvaluate(){
 
 
     if(mode!=3){//no use detecting input channel edges for square waveform
-        if(abs(minsmoothedTimestamp1-minsmoothedTimestamp0)<abs(minsmoothedTimestamp1-minsmoothedTimestamp0+(adcIndex1/periodsToScan))){//from notes:go with the smallest abs value of phase difference.
+        if(abs(minsmoothedTimestamp1-minsmoothedTimestamp0)<abs(minsmoothedTimestamp1-minsmoothedTimestamp0+((float)adcIndex1/periodsToScan))){//from notes:go with the smallest abs value of phase difference.
             stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0;
         }
         else{
-            stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0+(adcIndex1/periodsToScan);//(from notes)add 1 period in case the 1st edge didn't get picked at the dds source signal,causing it to show 1 period later.
+            stampDiff=minsmoothedTimestamp1-minsmoothedTimestamp0+((float)adcIndex1/periodsToScan);//(from notes)add 1 period in case the 1st edge didn't get picked at the dds source signal,causing it to show 1 period later.
         }
         pk_pk_phaseDiff[count]=360.0*freq*stampDiff*8/1e6;//adc timer cycle is 16us,sample for each channel every 8us
 
@@ -407,6 +410,50 @@ void smoothenAndEvaluate(){
 
     //pk_pk1[count]= (maxValue1-minValue1)*1.467/4096.0;//in volts TODO:try the other formula i have written down too.
     impedance[count]=(maxValue1-minValue1)*1.467/4096.0*1e5/2/gain;
+}
+
+//smoothen out response waveforms using rolling median
+void finalSmoothingImpedance(){
+    //smoothen out impedance
+        unsigned char smoothingInterval1=5;//todo:test this
+        char i3;
+        int i1,i2;
+        float smoothWindow[300],temp2;//!!let smoothingInterval<300
+        for(i1=smoothingInterval1/2;i1<(count-smoothingInterval1/2);i1++){
+            i3=0;
+            //copy values to buffer to sort them:
+            for(i2=0;i2<smoothingInterval1;i2++){
+                smoothWindow[i2]=impedance[i1-smoothingInterval1/2+i2];
+            }
+            while(i3<smoothingInterval1-1){
+            i2=0;
+                while(i2<smoothingInterval1-1){
+                    if (smoothWindow[i2]>smoothWindow[i2+1]){
+                        temp2=smoothWindow[i2];
+                        smoothWindow[i2]=smoothWindow[i2+1];
+                        smoothWindow[i2+1]=temp2;
+                    }
+                i2++;
+                }
+            i3++;
+            }
+            temp1[i1]=smoothWindow[smoothingInterval1/2];//save median
+
+        }
+        //fill array borders with first&last filtered values:
+        for(i1=0;i1<count;i1++){
+            if (i1<=smoothingInterval1/2){
+                temp1[i1]=temp1[smoothingInterval1/2+1];
+            }
+            else if (i1>=count-smoothingInterval1/2){
+                temp1[i1]=temp1[count-smoothingInterval1/2-1];
+            }
+        }
+
+        //restore filtered array to original array
+        for(i1=0;i1<count;i1++){
+            impedance[i1]=temp1[i1];
+        }
 }
 
 //smoothen out response waveforms using rolling median
@@ -954,6 +1001,7 @@ void main()
         }
         finalSmoothingMedian();//SMOOTHEN PHASE DIFF
         finalSmoothingAverage();//FURTHER SMOOTHEN USING ROLLING AVG FILTER
+        finalSmoothingImpedance();//SMOOTHEN imp USING THE ROLLING MEDIAN FILTER
         //tests...
         if(mode==1){
             mode=2;
