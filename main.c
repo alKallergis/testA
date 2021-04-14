@@ -1,4 +1,9 @@
-//to add
+//changed the digital resistor ad5272 and inamp ad8226 to a single ad8231 inamp,programmable with gpios 9-11
+//removed i2c for digital resistor and mclk output 20mhz for the DDS,changed to external 25mhz.
+//added 3 gpios for a0,a1,a2 gain adjust inputs of ad8231.
+//changed p-p current is 18.7uA with 33k Radj
+//REMOVED median smoothing in adc waveforms,used a 1nF cap which solves the issues.
+//changed D to short
 //TODO:CHANGE maxSweepFCount
 // Standard includes
 #include <string.h>
@@ -851,13 +856,13 @@ void main()
                 }
                 changeGain(D);
             }
-            if(minUnsmoothed1>1650){//for inductive loads. MAYBE NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
-                D=D+1;
-                if(D>7){
-                    D=7;
+/*            if(minUnsmoothed1>1710){//for inductive loads. NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
+                D=D/2;
+                if(D<>3){
+                    D=3;
                 }
                 changeGain(D);
-            }
+            }*/
             mincounter1=0;//todo
             mincounter0=0;
 
