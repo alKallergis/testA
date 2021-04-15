@@ -1,9 +1,8 @@
-//changed the digital resistor ad5272 and inamp ad8226 to a single ad8231 inamp,programmable with gpios 9-11
-//removed i2c for digital resistor and mclk output 20mhz for the DDS,changed to external 25mhz.
-//added 3 gpios for a0,a1,a2 gain adjust inputs of ad8231.
-//changed p-p current is 18.7uA with 33k Radj
-//REMOVED median smoothing in adc waveforms,used a 1nF cap which solves the issues.
-//changed D to short
+//added gain increment snippet for inductive loads.
+//removed delay line 812
+//made stepfreq global
+//changed constant GBWP
+//TODO:CHANGE maxSweepFCount
 // Standard includes
 #include <string.h>
 #include <stdlib.h>
@@ -47,8 +46,8 @@
 #define SPI_IF_BIT_RATE  100000
 #define TR_BUFF_SIZE     128
 #define adcSamplesNumber 16000   //to trace a whole period @10hz, 6250samples are needed per channel.(twice that for the 2 channels i use per input)
-#define GBWP  1500000   //AD8226 GBWP
-#define maxSweepFCount     10000 //TODO:5000 max measurements for now
+#define GBWP  2700000   //AD8231 GBWP
+#define maxSweepFCount     1100//wont use step less than 10.
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- Start
@@ -58,15 +57,15 @@ unsigned short freq0Msbs;
 unsigned short freq0Lsbs;
 unsigned short reset1=0b0000000100000000;
 unsigned short reset0=0b0000000000000000;
-int startFreq, freq,endFreq,mode;
+int stepFreq,startFreq,freq,endFreq,mode;
 int mincounter0,mincounter1,minTimestamp1,minTimestamp0;
 float stampDiff;
 static short D,Dprev;
 static unsigned short valAdc1[adcSamplesNumber],valAdc0[adcSamplesNumber],temp[adcSamplesNumber],minUnsmoothed1,minUnsmoothed0,maxUnsmoothed0,maxUnsmoothed1;
 static unsigned short minValue0,maxValue0,minValue1,maxValue1;
-static unsigned short count;//LET 5000 be the max bumber of frequencies todo change these to single variable later to savce space?
+static unsigned short count;//LET 10000 be the max bumber of frequencies todo change these to single variable later to savce space?
 static float pk_pk_phaseDiff[maxSweepFCount],temp1[maxSweepFCount],ohm,gain,impedance[maxSweepFCount],noRolloffFreq;
-//static float pk_pk1[maxSweepFCount]//save space
+static float pk_pk1[maxSweepFCount];//save space TODO
 unsigned long x,x1;
 float ms,y,periodus,periodsToScan;
 unsigned char i2cBuf[TR_BUFF_SIZE];
@@ -116,16 +115,13 @@ extern uVectorEntry __vector_table;
 //*****************************************************************************
 
 
-void changeGain(unsigned short d){//d=AD5272 digital wiper value
+
+void changeGain(unsigned short d){//d=0-7
     gain=1<<d;
     tBoolean gpio9,gpio10,gpio11;//values for the A2,A1,A0
     gpio9=(d&0b100)>>2;//msb
     gpio10=(d&0b10)>>1;
     gpio11=d&0b1;//lsb
-    int test345;
-    test345=gpio9<<1;//todo
-    test345=gpio10<<2;
-    test345=gpio11<<3;
     GPIOPinWrite(GPIOA1_BASE, 0x2,gpio9<<1);
     GPIOPinWrite(GPIOA1_BASE, 0x4,gpio10<<2);
     GPIOPinWrite(GPIOA1_BASE, 0x8,gpio11<<3);
@@ -276,7 +272,7 @@ void findInitialGain(){
     }
     changeGain(D);
 }
-
+//find edges & calculate phase difference and amplitude
 void Evaluate(){
     char i3,G=3;
     int i1,i2;
@@ -337,14 +333,14 @@ void Evaluate(){
         pk_pk_phaseDiff[count]=0;
     }
 
-    //pk_pk1[count]= (maxValue1-minValue1)*1.467/4096.0;//in volts TODO:try the other formula i have written down too.
+    pk_pk1[count]= (maxValue1-minValue1)*1.467/4096.0;//in volts TODO:try the other formula i have written down too.
     impedance[count]=(maxValue1-minValue1)*1.467/4096.0*1e5/1.87/gain;//p-p current is 18.7uA with 33k Radj
 }
 
 //Median filter according to wikipedia. Change each value according to its neigborhood's median. smoothen out response waveforms using rolling median
 void finalSmoothingImpedance(){
     //smoothen out impedance
-        unsigned char smoothingInterval1=5;//todo:test this
+        unsigned char smoothingInterval1=5;
         char i3;
         int i1,i2;
         float smoothWindow[300],temp2;//!!let smoothingInterval<300
@@ -441,7 +437,7 @@ void finalSmoothingAverage(){
         i3=0;
         //copy values to buffer to sort them:
         for(i2=0;i2<smoothingInterval1;i2++){
-            smoothWindow[i2]=pk_pk_phaseDiff[i1-smoothingInterval1/2+i2];//TODO CHANGED THIS
+            smoothWindow[i2]=pk_pk_phaseDiff[i1-smoothingInterval1/2+i2];
         }
         while(i3<smoothingInterval1-1){
         i2=0;
@@ -676,7 +672,6 @@ BoardInit(void)
 //*****************************************************************************
 void main()
 {
-    int stepFreq=0;
     //
     // Initialize Board configurations
     //
@@ -817,7 +812,6 @@ void main()
             PinTypeADC(PIN_59, PIN_MODE_255);
         }
 
-        MAP_UtilsDelay(MILLISECONDS_TO_TICKS(200));//DALAY A BIT FOR THE FIRST WAVE TO SETTLE.
         findInitialGain();//find the starting gain in the max frequency.
         while(freq>=startFreq){   //CLK FREQ is 20MHZ
             periodus=(1e6)/freq;
@@ -827,45 +821,10 @@ void main()
             //
             UART_PRINT("Sweeping @ freq :%dHz\n\r",freq);
 
-            minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
-            minUnsmoothed0=4095;
-            clipped=false;
-            adcIndex1=0;
-            adcIndex0=0;
-            TA1running=true;
-            if(freq<800){//todo: tweak this if for higher freqs maybe
-                periodsToScan=1.2;
-                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.
-            }
-            else{
-                periodsToScan=7;
-                TimerLoadSet(TIMERA1_BASE,TIMER_A,MILLISECONDS_TO_TICKS(periodsToScan*1000.0/freq)); //  1/freq = 1 period.   TODO:REDUCE later 10X??
-            }
-            TimerEnable(TIMERA1_BASE,TIMER_A);
-            clearAdc();// clear data
-            enableADCints();
-            ADCEnable(ADC_BASE);    //START TO MEASURE
-            while(TA1running==true);
-            disableADCints();
-
-            if((minUnsmoothed1<800)||(clipped==true)){//for inductive loads is NOT NEEDED to be increasing gain. 1st order circuits with inductors dont change significantly in the frequencies we use. need to go to MHZ frequencies.
-                D=D-1;//decrease gain.
-                if(D<0){
-                    D=0;
-                }
-                changeGain(D);
-            }
-/*            if(minUnsmoothed1>1650){//for inductive loads. MAYBE NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
-                D=D+1;
-                if(D>7){
-                    D=7;
-                }
-                changeGain(D);
-            }*/
             mincounter1=0;//todo
             mincounter0=0;
 
-
+            clipped=false;
             minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
             minUnsmoothed0=4095;
             maxUnsmoothed1=0;//start minimized,finish with acquired max value after each measurement.
@@ -891,6 +850,21 @@ void main()
             disableADCints();
             //removeFirstValues();//TODO:use??
 
+            if((minUnsmoothed1<800)||(clipped==true)){
+                D=D-1;//decrease gain to avoid clipping.
+                if(D<0){
+                    D=0;
+                }
+                changeGain(D);
+            }
+            if(minUnsmoothed1>1650){//for inductive loads. MAYBE NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
+                D=D+1;
+                if(D>7){
+                    D=7;
+                }
+                changeGain(D);
+            }
+
             //32bit timer init for measuring...
             Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
             TimerControlStall(TIMERA0_BASE, TIMER_A,true);  //enable timer stall on debug breakpoint
@@ -908,6 +882,8 @@ void main()
 /*            if(freq<endFreq){
                 waitForEnter();
             }*/
+
+            //todo:this could be source of error for extremely inductive loads which will increase gain in lower freqs
             if(count==0){
                 noRolloffFreq=(float)GBWP/gain/10;    //calculate this from gain used in the max used frequency. I assume zero rolloff happens in BW/10.
             }
