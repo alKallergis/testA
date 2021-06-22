@@ -1,8 +1,8 @@
-//changed the digital resistor ad5272 and inamp ad8226 to a single ad8231 inamp,programmable with gpios 9-11
-//removed i2c for digital resistor and mclk output 20mhz for the DDS,changed to external 25mhz.
-//added 3 gpios for a0,a1,a2 gain adjust inputs of ad8231.
-//changed constant GBWP
-//added delay line 1235 for the motorola phone.
+//changed limits for changing gain,used also maxValue1-minValue1 and maxValue1 to change gain.
+//changed findInitialGain function to successively find proper gain.
+//removed minUnsmoothed1,minUnsmoothed0,maxUnsmoothed0,maxUnsmoothed1 not needed anymore.
+//increased delay in line 1235 for motorola phone.
+//TODO:CHANGE maxSweepFCount
 
 // Standard includes
 #include <string.h>
@@ -108,7 +108,7 @@ unsigned short reset0=0b0000000000000000;
 static int startFreq,stepFreq,freq,endFreq,mode,freqCount,interval;
 int minTimestamp1,minTimestamp0,mincounter0,mincounter1;
 float stampDiff;
-static unsigned short D,Dprev;
+static unsigned short D;
 static unsigned short valAdc1[adcSamplesNumber],valAdc0[adcSamplesNumber],minUnsmoothed1,minUnsmoothed0,maxUnsmoothed0,maxUnsmoothed1;
 static unsigned short minValue0,maxValue0,minValue1,maxValue1;
 static unsigned short count,firstdata;//LET 10000 be the max bumber of frequencies todo change these to single variable later to save space
@@ -206,7 +206,7 @@ static void InitializeAppVariables()
 
 static int ConfigureMode(int iMode)
 {
-    char    pcSsidName[33]="cctestAP";
+    char    pcSsidName[33]="spectrumAp";
     char    password[33]="emp1emp1";
     char    val = SL_SEC_TYPE_WPA_WPA2;
     long    lRetVal = -1;
@@ -445,11 +445,12 @@ void startatFreq(float Freq ){
 }
 
 void findInitialGain(){
-    D=0;
-    Dprev=D;
+    count=0;//counter for each frequency change
     freq=endFreq;//START FROM FINAL FREQUENCY TO BE ABLE TO ADJUST GAIN FASTER
     startatFreq(freq);
-    while(1){
+    char i10=0;
+    D=0;
+    while(i10<100){//successively approach proper gain. 100 loops.
         changeGain(D);
         minUnsmoothed1=4095;//start maximized,finish with acquired min value after each measurement.
         minUnsmoothed0=4095;
@@ -472,26 +473,33 @@ void findInitialGain(){
         while(TA1running==true);
         disableADCints();
 
-        if((minUnsmoothed1<1400)||(clipped==true)){//todo decrease ΤΟ 1400?helps with BW it seems?
-            D=Dprev;
-            break;
+        Evaluate();//find edges,only maxValue1,minValue1 interests us here.
+
+
+        if(((maxValue1-minValue1)>1900)||(minValue1<700)||(maxValue1>3500)||(clipped==true)){   // we have big amplitude.reduce gain. (consider the perturbations from the solution potential that can overdrive the in-amp.)
+            D=D-1;//decrease gain to avoid clipping.
+            if(D<0){
+                D=0;
+            }
+            changeGain(D);
         }
-        else{
-            Dprev=D;
-            D=D+1;//BE INCREASING GAIN UNTIL CLIPPED.
+        if(((maxValue1-minValue1)<200)){//for inductive loads. MAYBE NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
+            D=D+1;
             if(D>7){
                 D=7;
-                UART_PRINT("Sample very conductive\n\r");
-                break;
             }
+            changeGain(D);
         }
+        i10++;
     }
-    changeGain(D);
+    if(D==7){
+        UART_PRINT("Sample very conductive\n\r");
+    }
+
 }
 //find edges & calculate phase difference and amplitude
 void Evaluate(){
-    char i3,G=3;
-    int i1,i2;
+    int i1;
     float i7,i8,i9;
 
 
@@ -551,6 +559,7 @@ void Evaluate(){
 
     //pk_pk1[count]= (maxValue1-minValue1)*1.467/4096.0;//in volts TODO:try the other formula i have written down too.
     impedance[count]=(maxValue1-minValue1)*1.467/4096.0*1e5/1.87/gain;//p-p current is 18.7uA with 33k Radj
+
 }
 
 
@@ -948,7 +957,6 @@ void setupSweep(){
 }
 
 void doSingleSweep(){
-    count=0;//counter for each frequency change
     while(freq>=startFreq){   //START FROM FINAL FREQ
          periodus=(1e6)/freq;
          startatFreq(freq);
@@ -985,21 +993,6 @@ void doSingleSweep(){
          while(TA1running==true);
          disableADCints();
 
-         if((minUnsmoothed1<800)||(clipped==true)){
-             D=D-1;//decrease gain to avoid clipping.
-             if(D<0){
-                 D=0;
-             }
-             changeGain(D);
-         }
-         if(minUnsmoothed1>1650){//for inductive loads. MAYBE NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
-             D=D+1;
-             if(D>7){
-                 D=7;
-             }
-             changeGain(D);
-         }
-
          //32bit timer init for measuring...
          Timer_IF_Init(PRCM_TIMERA0, TIMERA0_BASE, TIMER_CFG_PERIODIC, TIMER_A, 0);
          TimerControlStall(TIMERA0_BASE, TIMER_A,true);  //enable timer stall on debug breakpoint
@@ -1013,12 +1006,22 @@ void doSingleSweep(){
          ms=y/1000;  //ms
          TimerDisable(TIMERA0_BASE,TIMER_A);
 
+         if(((maxValue1-minValue1)>1900)||(minValue1<700)||(maxValue1>3500)||(clipped==true)){   // we have big amplitude.reduce gain. (consider the perturbations from the solution potential that can overdrive the in-amp.)
+             D=D-1;//decrease gain to avoid clipping.
+             if(D<0){
+                 D=0;
+             }
+             changeGain(D);
+         }
+         if(((maxValue1-minValue1)<200)){//for inductive loads. MAYBE NOT NEEDED. 1st order circuits with inductors dont change significanlty in the frequencies we use. need to go to MHZ frequencies.
+             D=D+1;
+             if(D>7){
+                 D=7;
+             }
+             changeGain(D);
+         }
 
-        /*            if(freq<endFreq){
-             waitForEnter();
-         }*/
-
-         //todo:this could be source of error for extremely inductive loads which will increase gain in lower freqs
+         //todo:this could be false for extremely inductive loads which will increase gain in lower freqs
          if(count==0){
              noRolloffFreq=(float)GBWP/gain/10;    //calculate this from gain used in the max used frequency. I assume zero rolloff happens in BW/10.
          }
@@ -1035,8 +1038,6 @@ void doSingleSweep(){
     UART_PRINT("0 Rolloff max frequency for this sample: %.1f\n\r",noRolloffFreq);
     UART_PRINT("Sweep finished\n\r");
 }
-
-
 
 
 //****************************************************************************
@@ -1232,7 +1233,7 @@ int cellServer(unsigned short usPort)
                 sprintf(g_cBsdBuf,"{freq:%d,mag:%.2f,phase:%.2f}\n",freq,impedance[count],pk_pk_phaseDiff[count]);
                 // sending packet
                 iStatus = sl_Send(iNewSockID,g_cBsdBuf,BUF_SIZE,0);
-                MAP_UtilsDelay(200000);//TODO some phones like the motorola one,dont pick up the packets fast enough and this delay is needed.found 100000 cycles to be insufficient 140000 seems ok.
+                MAP_UtilsDelay(300000);//TODO some phones like the motorola ,dont pick up the packets fast enough and this delay is needed.found 100000 cycles to be insufficient 140000 seems ok.
                 _SlNonOsMainLoopTask(); //needed?
                 if( iStatus <= 0 ){// error
                     iStatus = sl_Close(iNewSockID);
